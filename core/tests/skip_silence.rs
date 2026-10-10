@@ -91,6 +91,36 @@ fn skip_to_matches_a_fresh_render_from_the_target() {
     assert!(len_diff < 64, "length {} vs {}", after.len(), reference.len());
 }
 
+/// A skip must not repeat audio. A slow monotone ramp makes any repeat visible
+/// as a jump backwards in the output.
+#[test]
+fn skip_does_not_repeat_audio() {
+    let sr = 48000;
+    let n = sr as usize * 4;
+    let x: Vec<f32> = (0..n).map(|i| i as f32 / n as f32).collect();
+    let skip = 2 * sr as usize;
+
+    for speed in [1.0f64, 2.0, 4.0] {
+        let mut s = StreamStretcher::new(sr, speed);
+        s.push(&x[..skip]);
+        let _ = s.pull(1 << 20);
+        s.skip_to(skip as f64);
+        s.push(&x[skip..]);
+        let mut out = Vec::new();
+        drain(&mut s, &mut out);
+
+        let mut worst_back = 0.0f32;
+        for i in 1..out.len() {
+            worst_back = worst_back.max(out[i - 1] - out[i]);
+        }
+        // A ramp has a tiny per-sample rise; a repeat would be a large step back.
+        assert!(
+            worst_back < 0.005,
+            "speed {speed}: backward jump of {worst_back} suggests doubled audio"
+        );
+    }
+}
+
 /// A skip that targets an already-passed position must be clamped, never rewind.
 #[test]
 fn skip_to_is_monotonic() {
