@@ -6,10 +6,18 @@
 
 use crate::classes::{Class, Mode};
 use crate::engines::{psola, wsola};
+use crate::filters::smooth_unit;
 use crate::pitch::track_f0;
 use crate::timing::{SegmentRate, TimeMap};
 
 /// Render `x` according to `rates`, assembled into the domain of `time_map`.
+///
+/// PSOLA and WSOLA are never spliced. Everywhere the two engines could disagree,
+/// chiefly at voiced/unvoiced transitions, they are blended with a continuous
+/// weight taken from PSOLA's overlap-add gain envelope. Splicing on a boolean
+/// coverage mask steps the waveform at exactly those transitions, which is
+/// audible as a click and shows up as a full-height broadband line in a
+/// spectrogram.
 pub fn render(x: &[f64], time_map: &TimeMap, rates: &[SegmentRate], sr: u32) -> Vec<f64> {
     let out_length = time_map.out_length().max(0) as usize;
     if out_length == 0 {
@@ -19,23 +27,42 @@ pub fn render(x: &[f64], time_map: &TimeMap, rates: &[SegmentRate], sr: u32) -> 
     let track = track_f0(x, sr, None);
     let analysis = psola::analyse(x, sr, Some(&track), None);
 
-    let (mut out, covered) = if analysis.usable() {
-        psola::render_with_coverage(x, time_map, sr, None, Some(&track))
+    // Pitch-synchronous pass, empty when there is nothing periodic to lock onto.
+    let (mut out, envelope) = if analysis.usable() {
+        psola::render_with_envelope(x, time_map, sr, None, Some(&track))
     } else {
-        (vec![0.0; out_length], vec![false; out_length])
+        (vec![0.0; out_length], vec![0.0; out_length])
     };
+    apply_copy_through(&mut out, x, time_map, rates, out_length);
 
-    let all_covered = covered.iter().all(|c| *c);
-    if !all_covered {
-        let filler = wsola::render(x, time_map, sr, None);
-        for i in 0..out_length {
-            if !covered[i] {
-                out[i] = filler.get(i).copied().unwrap_or(0.0);
-            }
-        }
+    let weight = psola_weight(&envelope, sr);
+    if weight.iter().all(|w| *w >= 1.0) {
+        return out;
     }
 
-    // Copy-through regions are written last so neither pass can disturb them.
+    // Only pay for the overlap-add pass where PSOLA does not fully own the signal.
+    let mut filler = wsola::render(x, time_map, sr, None);
+    filler.resize(out_length, 0.0);
+    apply_copy_through(&mut filler, x, time_map, rates, out_length);
+
+    for i in 0..out_length {
+        let w = weight[i];
+        out[i] = out[i] * w + filler[i] * (1.0 - w);
+    }
+    out
+}
+
+/// Overwrite copy-through regions (stop closures, bursts) with the raw input.
+///
+/// Applied to both engine outputs before they are blended, so the blend sees the
+/// same content either way and the transition stays continuous.
+fn apply_copy_through(
+    out: &mut [f64],
+    x: &[f64],
+    time_map: &TimeMap,
+    rates: &[SegmentRate],
+    out_length: usize,
+) {
     for r in rates {
         if r.mode != Mode::CopyThrough {
             continue;
@@ -54,8 +81,31 @@ pub fn render(x: &[f64], time_map: &TimeMap, rates: &[SegmentRate], sr: u32) -> 
             out[lo + k] = x[src + k];
         }
     }
+}
 
-    out
+/// Turn PSOLA's overlap-add gain envelope into a blend weight in `[0, 1]`.
+///
+/// The envelope sits at its steady-state overlap count through the interior of
+/// voiced material and decays to zero across the outer window edge, so it ramps
+/// smoothly from "PSOLA owns this" to "PSOLA has nothing to say here". A high
+/// percentile is used as the reference rather than the peak so that irregular
+/// mark spacing cannot push an interior sample below full weight.
+fn psola_weight(envelope: &[f64], sr: u32) -> Vec<f64> {
+    let mut nonzero: Vec<f64> = envelope.iter().copied().filter(|v| *v > 1e-12).collect();
+    if nonzero.is_empty() {
+        return vec![0.0; envelope.len()];
+    }
+    nonzero.sort_by(|a, b| a.partial_cmp(b).unwrap());
+    let reference = nonzero[nonzero.len() * 95 / 100].max(1e-12);
+
+    let mut weight: Vec<f64> = envelope
+        .iter()
+        .map(|v| (v / reference).clamp(0.0, 1.0))
+        .collect();
+    // Short symmetric smoothing removes the ripple that mark-spacing jitter
+    // leaves in the interior without shifting the edge transitions.
+    smooth_unit(&mut weight, ((0.005 * sr as f64).round() as usize).max(3));
+    weight
 }
 
 /// Uniform compression with pitch preserved, for the control condition.

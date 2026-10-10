@@ -4,7 +4,12 @@
 //! implementation relied on (`get_window`, `median_filter`, `maximum_filter1d`,
 //! `uniform_filter1d`, `np.convolve`, and FFT-based autocorrelation).
 
-use realfft::RealFftPlanner;
+use std::cell::RefCell;
+use std::collections::HashMap;
+use std::sync::Arc;
+
+use realfft::{ComplexToReal, RealFftPlanner, RealToComplex};
+use rustfft::num_complex::Complex;
 
 /// Symmetric Hann window (`scipy.signal.get_window("hann", n, fftbins=False)`).
 pub fn hann(n: usize) -> Vec<f64> {
@@ -15,6 +20,31 @@ pub fn hann(n: usize) -> Vec<f64> {
     (0..n)
         .map(|i| 0.5 - 0.5 * (2.0 * std::f64::consts::PI * i as f64 / denom).cos())
         .collect()
+}
+
+/// In-place smoothing of a signal already confined to `[0, 1]`, by a Hann-kernel
+/// moving average with clamped edges.
+///
+/// The kernel is non-negative and normalised by its own sum, so the result is
+/// still a convex combination of the inputs and cannot leave `[0, 1]`.
+pub fn smooth_unit(v: &mut [f64], width: usize) {
+    let width = width.max(3) | 1; // odd, so the kernel has a true centre sample
+    let n = v.len();
+    if n < 3 || width < 3 {
+        return;
+    }
+    let kernel = hann(width);
+    let ksum: f64 = kernel.iter().sum();
+    let half = (width / 2) as isize;
+    let src = v.to_vec();
+    for (i, slot) in v.iter_mut().enumerate() {
+        let mut acc = 0.0;
+        for (k, w) in kernel.iter().enumerate() {
+            let j = (i as isize + k as isize - half).clamp(0, n as isize - 1) as usize;
+            acc += w * src[j];
+        }
+        *slot = acc / ksum;
+    }
 }
 
 /// Full convolution trimmed the way `np.convolve(..., mode="same")` does.
@@ -81,18 +111,40 @@ pub fn maximum_filter1d_nearest(x: &[f64], size: usize) -> Vec<f64> {
 }
 
 /// Moving average with nearest-edge padding (`scipy.ndimage.uniform_filter1d`, mode="nearest").
+///
+/// Implemented with a running sum, which makes it O(n + size) instead of
+/// O(n * size). The window here is the WSOLA frame length (1536 samples at
+/// 48 kHz), so the naive form cost roughly 40 million iterations per streaming
+/// block and left the playback engine slower than real time at high speeds.
+///
+/// The running sum is resynchronised from scratch periodically so floating
+/// point drift cannot accumulate over a long signal.
 pub fn uniform_filter1d_nearest(x: &[f64], size: usize) -> Vec<f64> {
     let n = x.len();
     if n == 0 || size <= 1 {
         return x.to_vec();
     }
-    let half = size / 2;
-    let mut out = vec![0.0f64; n];
-    for i in 0..n {
+    let half = (size / 2) as isize;
+    let last = n as isize - 1;
+    let window_sum = |centre: isize| -> f64 {
         let mut sum = 0.0;
-        for j in 0..size {
-            let idx = (i as isize + j as isize - half as isize).clamp(0, n as isize - 1) as usize;
+        for j in 0..size as isize {
+            let idx = (centre + j - half).clamp(0, last) as usize;
             sum += x[idx];
+        }
+        sum
+    };
+
+    let mut out = vec![0.0f64; n];
+    let mut sum = window_sum(0);
+    out[0] = sum / size as f64;
+    for i in 1..n {
+        let centre = i as isize;
+        let add = (centre + half).clamp(0, last) as usize;
+        let sub = (centre - 1 - half).clamp(0, last) as usize;
+        sum += x[add] - x[sub];
+        if i % 1024 == 0 {
+            sum = window_sum(centre);
         }
         out[i] = sum / size as f64;
     }
@@ -154,25 +206,67 @@ pub fn resize_linear(x: &[f64], length: usize) -> Vec<f64> {
 
 /// Autocorrelation of `frame` for lags `0..=max_lag`, normalised as NumPy's
 /// `irfft(rfft(a) * conj(rfft(a)))` is (i.e. the true correlation, no `size` factor).
+///
+/// Planning a transform allocates scratch buffers and computes twiddles, which
+/// costs far more than running the transform. `autocorr` runs once per pitch
+/// analysis frame, so re-planning on every call dominated the streaming
+/// engine's cost and left it slower than real time above 2x. Plans and work
+/// buffers are therefore cached per size.
 pub fn autocorr(frame: &[f64], size: usize, max_lag: usize) -> Vec<f64> {
-    let mut planner = RealFftPlanner::<f64>::new();
-    let r2c = planner.plan_fft_forward(size);
-    let c2r = planner.plan_fft_inverse(size);
+    FFT_CACHE.with(|cell| {
+        let mut cache = cell.borrow_mut();
+        let plan = cache.entry(size).or_insert_with(|| FftPlan::new(size));
 
-    let mut input = r2c.make_input_vec();
-    for (i, &v) in frame.iter().enumerate().take(size) {
-        input[i] = v;
-    }
-    let mut spectrum = r2c.make_output_vec();
-    r2c.process(&mut input, &mut spectrum).expect("r2c");
-    for c in spectrum.iter_mut() {
-        *c = c.norm_sqr().into();
-    }
-    let mut out = c2r.make_output_vec();
-    c2r.process(&mut spectrum, &mut out).expect("c2r");
+        for slot in plan.input.iter_mut() {
+            *slot = Default::default();
+        }
+        let n = frame.len().min(size);
+        for (dst, &v) in plan.input[..n].iter_mut().zip(frame.iter()) {
+            *dst = v.into();
+        }
 
-    let scale = 1.0 / size as f64;
-    out.iter().take(max_lag + 1).map(|v| v * scale).collect()
+        plan.r2c.process(&mut plan.input, &mut plan.spectrum).expect("r2c");
+        for c in plan.spectrum.iter_mut() {
+            *c = c.norm_sqr().into();
+        }
+        plan.c2r
+            .process(&mut plan.spectrum, &mut plan.scratch)
+            .expect("c2r");
+
+        let scale = 1.0 / size as f64;
+        plan.scratch[..max_lag + 1].iter().map(|v| v * scale).collect()
+    })
+}
+
+/// A planned forward/inverse real FFT pair plus its reusable work buffers.
+struct FftPlan {
+    r2c: Arc<dyn RealToComplex<f64>>,
+    c2r: Arc<dyn ComplexToReal<f64>>,
+    input: Vec<f64>,
+    spectrum: Vec<Complex<f64>>,
+    scratch: Vec<f64>,
+}
+
+impl FftPlan {
+    fn new(size: usize) -> Self {
+        let mut planner = RealFftPlanner::<f64>::new();
+        let r2c = planner.plan_fft_forward(size);
+        let c2r = planner.plan_fft_inverse(size);
+        let input = r2c.make_input_vec();
+        let spectrum = r2c.make_output_vec();
+        let scratch = c2r.make_output_vec();
+        FftPlan {
+            r2c,
+            c2r,
+            input,
+            spectrum,
+            scratch,
+        }
+    }
+}
+
+thread_local! {
+    static FFT_CACHE: RefCell<HashMap<usize, FftPlan>> = RefCell::new(HashMap::new());
 }
 
 #[cfg(test)]

@@ -8,8 +8,13 @@
 import { audioContext } from "./audio/decode.js";
 import { StreamStretcher, timeStretch } from "./core/dsp.js";
 
-const LOOKAHEAD = 0.6; // seconds of output to keep scheduled ahead
+const LOOKAHEAD = 1.5; // seconds of output to keep scheduled ahead
 const OUT_CHUNK = 0.2; // seconds of output per rendered buffer
+// Never start a buffer closer than this to "now". If the main thread stalls
+// long enough to let the graph drain, the schedule is pushed forward to here so
+// the backlog is dropped cleanly. Starting a buffer in the past makes it begin
+// immediately, which would overlap every queued buffer on top of each other.
+const MIN_LEAD = 0.05;
 
 export class Player {
   constructor({ onPosition, onEnd } = {}) {
@@ -107,7 +112,11 @@ export class Player {
 
   _tick() {
     if (!this.playing) return;
-    const horizon = this.ctx.currentTime + LOOKAHEAD;
+    const now = this.ctx.currentTime;
+    if (this.scheduleTime < now + MIN_LEAD) {
+      this.scheduleTime = now + MIN_LEAD;
+    }
+    const horizon = now + LOOKAHEAD;
     let guard = 0;
     while (this.scheduleTime < horizon && guard < 50) {
       guard++;
@@ -132,7 +141,7 @@ export class Player {
       this.sources.push(node);
       this.scheduleTime += chunk.length / this.sr;
     }
-    const elapsed = Math.max(0, this.ctx.currentTime - this.timeStart);
+    const elapsed = Math.max(0, now - this.timeStart);
     const pos = Math.min(
       this.pcm.length,
       this.srcStart + elapsed * this.sr * this.activeSpeed

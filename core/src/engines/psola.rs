@@ -169,6 +169,14 @@ fn output_marks(
 }
 
 /// Render one input span into one output span using a global analysis.
+///
+/// The second return value is the overlap-add gain envelope, i.e. the summed
+/// window weights. It saturates near `window_periods` where the usual number of
+/// marks overlap, and falls to zero at the outer edge of the mark coverage. That
+/// makes it a continuous "how much of this sample did PSOLA actually build"
+/// weight, which the hybrid renderer blends against WSOLA with. A boolean
+/// coverage mask cannot express that, and splicing on it steps the waveform
+/// wherever the two engines disagree.
 pub fn render_span(
     x: &[f64],
     time_map: &TimeMap,
@@ -178,23 +186,23 @@ pub fn render_span(
     out_lo: i64,
     out_hi: i64,
     params: Option<PsolaParams>,
-) -> (Vec<f64>, Vec<bool>) {
+) -> (Vec<f64>, Vec<f64>) {
     let params = params.unwrap_or_default();
     let span = (out_hi - out_lo).max(0) as usize;
     let mut out = vec![0.0f64; span];
-    let mut coverage = vec![false; span];
+    let envelope = vec![0.0f64; span];
     if span == 0 || in_hi <= in_lo {
-        return (out, coverage);
+        return (out, envelope);
     }
 
     let (marks, periods) = analysis.span(in_lo, in_hi);
     if marks.len() < 2 {
-        return (out, coverage);
+        return (out, envelope);
     }
 
     let (positions, sources, source_indices) = output_marks(&marks, &periods, time_map, out_lo, out_hi);
     if positions.is_empty() {
-        return (out, coverage);
+        return (out, envelope);
     }
 
     let widths: Vec<usize> = source_indices
@@ -227,7 +235,6 @@ pub fn render_span(
             let oi = (out_start + j as i64) as usize;
             out[oi] += window[j] * x[xi];
             envelope[oi] += window[j];
-            coverage[oi] = true;
         }
     }
 
@@ -238,7 +245,7 @@ pub fn render_span(
             out[i] = 0.0;
         }
     }
-    (out, coverage)
+    (out, envelope)
 }
 
 /// Render `x` pitch-synchronously over the whole extent of `time_map`.
@@ -263,14 +270,14 @@ pub fn render(
     rendered
 }
 
-/// Whole-signal render plus the mask of samples that received marks.
-pub fn render_with_coverage(
+/// Whole-signal render plus the OLA gain envelope.
+pub fn render_with_envelope(
     x: &[f64],
     time_map: &TimeMap,
     sr: u32,
     params: Option<PsolaParams>,
     track: Option<&F0Track>,
-) -> (Vec<f64>, Vec<bool>) {
+) -> (Vec<f64>, Vec<f64>) {
     let analysis = analyse(x, sr, track, params);
     render_span(
         x,
@@ -355,9 +362,11 @@ mod tests {
         let sr = 16000;
         let x = steady_tone(140.0, 1.5, sr);
         let tm = TimeMap::uniform(x.len() as i64, 1.0).unwrap();
-        let (y, coverage) = render_with_coverage(&x, &tm, sr, None, None);
-        assert!(coverage.iter().any(|c| *c));
-        let mut mask = coverage.clone();
+        let (y, envelope) = render_with_envelope(&x, &tm, sr, None, None);
+        assert!(envelope.iter().any(|c| *c > 1e-12));
+        let mask: Vec<bool> = envelope.iter().map(|c| *c > 1e-12).collect();
+        assert!(mask.iter().any(|c| *c));
+        let mut mask = mask;
         for i in 0..400.min(mask.len()) {
             mask[i] = false;
         }
