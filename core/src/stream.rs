@@ -100,6 +100,24 @@ impl StreamStretcher {
         self.pump();
     }
 
+    /// Jump the input cursor forward to `input_pos`, discarding buffered input and
+    /// any overlap-add carry.
+    ///
+    /// Used to skip a region (a long silence) during playback. The output is
+    /// discontinuous across the jump, which is inaudible because callers only skip
+    /// regions whose amplitude is at the floor. The target is clamped to be
+    /// monotonic so a stale or out-of-order call can never rewind the engine.
+    pub fn skip_to(&mut self, input_pos: f64) {
+        let target = input_pos.max(self.xc);
+        self.input.clear();
+        self.base = target;
+        self.xc = target;
+        self.ready.clear();
+        self.pending.clear();
+        self.started = false;
+        self.eof = false;
+    }
+
     /// Render at most a few blocks per call so latency stays bounded.
     fn pump(&mut self) {
         for _ in 0..6 {
@@ -141,6 +159,11 @@ impl StreamStretcher {
         if i_end_u <= i0_u {
             return false;
         }
+        // The render buffer starts at `base + i0_u`, which equals `i0` only while
+        // there is a full look-behind of history. After `skip_to` there is none, so
+        // the emit window must be measured from the buffer that actually exists
+        // rather than from the requested (and clipped) `i0`.
+        let buf_start = self.base + i0_u as f64;
 
         let buf: Vec<f64> = self.input[i0_u..i_end_u].iter().map(|v| *v as f64).collect();
         // At 1.0x there is nothing to stretch: pass the input straight through so
@@ -154,8 +177,8 @@ impl StreamStretcher {
         };
 
         let emit_end = end.min(self.xc + sp); // principal input region to emit
-        let j0 = (((self.xc - i0) * ratio)).round() as i64;
-        let mut j_end = (((emit_end - i0) * ratio)).round() as i64;
+        let j0 = ((self.xc - buf_start) * ratio).round() as i64;
+        let mut j_end = ((emit_end - buf_start) * ratio).round() as i64;
         j_end = j_end.min((rendered.len() as i64).max(j0));
         if j_end <= j0 {
             return false;

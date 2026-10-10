@@ -3,7 +3,7 @@
 A local-first audio tool with four capabilities:
 
 1. **Record** microphone audio (or load a file) as WAV/MP3.
-2. **Play back at 1.0–3.0×** while staying intelligible, using a port of the
+2. **Play back at 1.0–4.0×** while staying intelligible, using a port of the
    [FastTalk](../FastTalk) pitch-preserving time-scale modification pipeline.
 3. **Transcribe** on-device with Whisper (transformers.js, WASM/WebGPU), using the
    `*_timestamped` ONNX exports so clickable word timestamps work.
@@ -151,6 +151,12 @@ the left/right to change it (with the optional class-aware allocation for baked
 exports), click it to step up 0.25×, or double-click to reset to 1.0×. Play/stop
 use icon-only buttons; Space is still play/stop.
 
+**Skip silence.** The `skip silence` checkbox next to the speed readout skips any
+silence longer than 0.5 s. During playback the engine jumps the playhead past the
+gap (via `StreamStretcher.skip_to`); in a speed-baked export the gaps are removed
+from the rendered audio, and a `SkipBakedMap` keeps clip boundaries aligned with
+what was actually written. Short pauses are kept, so speech rhythm survives.
+
 ### Known limitations
 
 - **Class-aware allocation is approximated.** FastTalk's headline feature allocates
@@ -164,7 +170,8 @@ use icon-only buttons; Space is still play/stop.
 
 ```powershell
 cd core
-cargo test            # 36 unit tests: timing, pitch, PSOLA, WSOLA, streaming, rate
+cargo test            # 46 tests: timing, pitch, PSOLA, WSOLA, streaming, rate,
+                      # step continuity, real-time throughput, skip-silence
 node dsp_smoke.mjs    # WASM bindings end-to-end (needs: npx wasm-pack build --target nodejs)
 ```
 

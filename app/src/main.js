@@ -1,5 +1,5 @@
 // Application wiring: record/load → waveform → playback → transcribe → export.
-import { initDsp, getDspVersion, makeBakedMap } from "./core/dsp.js";
+import { initDsp, getDspVersion, makeBakedMap, makeSkipBakedMap, timeStretchSkipSilence, silenceZones } from "./core/dsp.js";
 import { decodeAudioBlob, audioContext } from "./audio/decode.js";
 import { Recorder } from "./audio/record.js";
 import { encode, encodeWav } from "./audio/encode.js";
@@ -84,8 +84,14 @@ function recordingName(date = new Date()) {
 }
 
 const SPEED_MIN = 1.0;
-const SPEED_MAX = 3.0;
+const SPEED_MAX = 4.0;
 let speedValue = 1.0;
+
+// Silence longer than this is skipped, both in playback and in a speed-baked
+// export. Short pauses are kept so speech rhythm survives.
+const SKIP_MIN_S = 0.5;
+let skipSilence = false;
+let silenceZoneCache = null;
 
 function currentSpeed() {
   return speedValue;
@@ -96,6 +102,48 @@ function setSpeedUI(s) {
   $("speed").textContent = speedValue.toFixed(2) + "×";
   $("speed").setAttribute("aria-valuenow", speedValue.toFixed(2));
   player.setSpeed(speedValue);
+}
+
+/** Silence zones in input samples, computed once per loaded recording. */
+function getSilenceZones() {
+  if (!state.pcm) return [];
+  if (!silenceZoneCache) {
+    silenceZoneCache = silenceZones(state.pcm, state.sampleRate, SKIP_MIN_S);
+  }
+  return silenceZoneCache;
+}
+
+/** Apply the current skip-silence setting to the live player. */
+function applySkipSilence() {
+  player.setSkipMap(skipSilence ? getSilenceZones() : []);
+}
+
+function setSkipSilence(on) {
+  skipSilence = on;
+  const box = $("skipSilence");
+  if (box) box.checked = on;
+  if (on && state.pcm) {
+    $("saveStatus").textContent = "Finding silence…";
+    // Let the status paint before the (synchronous) energy scan runs.
+    setTimeout(() => {
+      try {
+        applySkipSilence();
+        const zones = getSilenceZones().length;
+        $("saveStatus").textContent = zones
+          ? `Skipping ${zones} silence gap${zones === 1 ? "" : "s"} over ${SKIP_MIN_S}s`
+          : `No silence longer than ${SKIP_MIN_S}s found`;
+      } catch (err) {
+        skipSilence = false;
+        if (box) box.checked = false;
+        applySkipSilence();
+        $("saveStatus").textContent = `Skip silence failed: ${err.message}`;
+      }
+      refreshClipDurations();
+    }, 0);
+  } else {
+    applySkipSilence();
+    refreshClipDurations();
+  }
 }
 
 // ── Data-loss safety ──────────────────────────────────────────────────────────
@@ -157,6 +205,8 @@ function setSource(pcm, sampleRate, label) {
   state.sourceName = label || "recording";
   waveform.setData(pcm, sampleRate);
   player.setSource(pcm, sampleRate);
+  silenceZoneCache = null;
+  applySkipSilence();
   $("fileMeta").textContent = `${label} · ${(pcm.length / sampleRate).toFixed(1)}s @ ${sampleRate} Hz`;
   enableCards(true);
   markUnsaved();
@@ -431,6 +481,8 @@ $("normBtn").addEventListener("click", async () => {
   state.pcm = out;
   waveform.refreshData(out, state.sampleRate);
   player.setSource(out, state.sampleRate);
+  silenceZoneCache = null;
+  applySkipSilence();
   markUnsaved();
   persistAutosave();
   if (wasPlaying) {
@@ -745,12 +797,10 @@ function renderClipList() {
     return;
   }
   // Display baked clip lengths without rendering audio: one position map can map
-  // every boundary, including a non-uniform class-aware plan.
+  // every boundary, including a non-uniform class-aware plan or skipped silence.
   let mapper = null;
   try {
-    if (useBakedExport()) {
-      mapper = makeBakedMap(state.pcm, state.sampleRate, speedValue, $("classAware").checked);
-    }
+    mapper = makeExportMap();
     const clips = buildClips(state.splits, state.pcm.length);
     clips.forEach((c, i) => {
       const row = document.createElement("div");
@@ -788,9 +838,44 @@ function useBakedExport() {
   return $("speedBaked").checked && Math.abs(speedValue - 1.0) >= 1e-9;
 }
 
+/** True when the export should drop long silences (requires speed-baked). */
+function useSkipExport() {
+  return skipSilence && $("speedBaked").checked;
+}
+
+/** Position map for the active export mode, or null when no render is used. */
+function makeExportMap() {
+  if (!state.pcm) return null;
+  if (useSkipExport()) {
+    return makeSkipBakedMap(
+      state.pcm,
+      state.sampleRate,
+      speedValue,
+      $("classAware").checked,
+      SKIP_MIN_S
+    );
+  }
+  if (useBakedExport()) {
+    return makeBakedMap(state.pcm, state.sampleRate, speedValue, $("classAware").checked);
+  }
+  return null;
+}
+
 /** Render source PCM for export, using the same DSP bake as playback exports. */
 function exportSource() {
   if (!state.pcm) return null;
+  if (useSkipExport()) {
+    return {
+      pcm: timeStretchSkipSilence(
+        state.pcm,
+        state.sampleRate,
+        speedValue,
+        $("classAware").checked,
+        SKIP_MIN_S
+      ),
+      sampleRate: state.sampleRate,
+    };
+  }
   if (!useBakedExport()) {
     return { pcm: state.pcm, sampleRate: state.sampleRate };
   }
@@ -805,12 +890,12 @@ function exportSource() {
  * class-aware time map when selected, rather than assuming a uniform ratio.
  */
 function mapClipForExport(clip) {
-  if (!useBakedExport()) {
+  const mapper = makeExportMap();
+  if (!mapper) {
     return { pcm: state.pcm, start: clip.start, end: clip.end };
   }
-  const src = exportSource();
-  const mapper = makeBakedMap(state.pcm, state.sampleRate, speedValue, $("classAware").checked);
   try {
+    const src = exportSource();
     return {
       pcm: src.pcm,
       start: mapper.mapSample(clip.start),
@@ -824,20 +909,29 @@ function mapClipForExport(clip) {
 // Keep displayed clip lengths in output time when baked-export inputs change.
 $("speedBaked").addEventListener("change", refreshClipDurations);
 $("classAware").addEventListener("change", refreshClipDurations);
+$("skipSilence").addEventListener("change", () => setSkipSilence($("skipSilence").checked));
 
 $("exportAll").addEventListener("click", () => {
   if (!state.pcm) return;
   const fmtSel = $("exportFormat").value;
   try {
     const src = exportSource();
+    if (src.pcm.length === 0) {
+      $("exportStatus").textContent = "Nothing to export — no speech found";
+      return;
+    }
     const baked = useBakedExport();
+    const skip = useSkipExport();
     const base = (state.sourceName || "recording").replace(/\s+/g, " ");
-    const name = baked ? `${base}-${speedValue.toFixed(2)}x` : base;
+    const suffix = skip ? "nosilence" : `${speedValue.toFixed(2)}x`;
+    const name = baked || skip ? `${base}-${suffix}` : base;
     exportSlice(src.pcm, src.sampleRate, 0, src.pcm.length, fmtSel, `${name}.${fmtSel}`);
     markSaved();
-    $("exportStatus").textContent = baked
-      ? `Exported whole file, speed-baked at ${speedValue.toFixed(2)}×`
-      : "Exported whole file";
+    $("exportStatus").textContent = skip
+      ? `Exported whole file, silence removed, baked at ${speedValue.toFixed(2)}×`
+      : baked
+        ? `Exported whole file, speed-baked at ${speedValue.toFixed(2)}×`
+        : "Exported whole file";
   } catch (err) {
     $("exportStatus").textContent = `Export failed: ${err.message}`;
   }

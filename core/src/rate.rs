@@ -23,6 +23,91 @@ fn frame_rms(x: &[f64], frame: usize, hop: usize) -> Vec<f64> {
         .collect()
 }
 
+/// Frame RMS energy over `f32` samples.
+///
+/// The playback path needs silence detection but must not materialise an `f64`
+/// copy of the whole recording (8 bytes/sample, ~1.4 GB for an hour at 48 kHz).
+/// This computes the energy in place on the `f32` slice instead.
+fn frame_rms_f32(x: &[f32], frame: usize, hop: usize) -> Vec<f64> {
+    if x.len() < frame || hop == 0 {
+        return Vec::new();
+    }
+    let n = 1 + (x.len() - frame) / hop;
+    (0..n)
+        .map(|i| {
+            let base = i * hop;
+            let s: f64 = x[base..base + frame]
+                .iter()
+                .map(|v| {
+                    let v = *v as f64;
+                    v * v
+                })
+                .sum();
+            (s / frame as f64).sqrt()
+        })
+        .collect()
+}
+
+/// Classify frame energies into contiguous speech/silence runs.
+///
+/// Each run is `(start_sample, end_sample, is_speech)`. The threshold is the
+/// 10th-percentile noise floor plus 8% of the peak-to-floor range, which adapts
+/// to a recording's own level rather than assuming an absolute one.
+fn energy_runs(x_len: usize, rms: &[f64], hop: usize, frame: usize) -> Vec<(i64, i64, bool)> {
+    if rms.is_empty() {
+        return Vec::new();
+    }
+    let mut sorted = rms.to_vec();
+    sorted.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
+    let peak = sorted[sorted.len() - 1];
+    let floor = sorted[sorted.len() / 10];
+    let threshold = (floor + 0.08 * (peak - floor)).max(1e-4);
+
+    let speech: Vec<bool> = rms.iter().map(|v| *v > threshold).collect();
+    let mut runs = Vec::new();
+    let mut start_frame = 0usize;
+    let mut current = speech[0];
+    for i in 1..speech.len() {
+        if speech[i] != current {
+            push_run(&mut runs, x_len, start_frame, i, hop, frame, current);
+            start_frame = i;
+            current = speech[i];
+        }
+    }
+    push_run(&mut runs, x_len, start_frame, speech.len(), hop, frame, current);
+    runs
+}
+
+fn run_bounds(
+    x_len: usize,
+    first_frame: usize,
+    last_frame: usize,
+    hop: usize,
+    frame: usize,
+) -> Option<(i64, i64)> {
+    let start = (first_frame * hop) as i64;
+    let end = ((last_frame.saturating_sub(1)) * hop + frame).min(x_len) as i64;
+    if end <= start {
+        None
+    } else {
+        Some((start, end))
+    }
+}
+
+fn push_run(
+    runs: &mut Vec<(i64, i64, bool)>,
+    x_len: usize,
+    first_frame: usize,
+    last_frame: usize,
+    hop: usize,
+    frame: usize,
+    speech: bool,
+) {
+    if let Some((start, end)) = run_bounds(x_len, first_frame, last_frame, hop, frame) {
+        runs.push((start, end, speech));
+    }
+}
+
 /// Segment audio into silence and speech by local energy.
 ///
 /// Returns a contiguous, non-overlapping cover of `[0, len)` labelled
@@ -31,60 +116,41 @@ pub fn align_by_energy(x: &[f64], sr: u32) -> Vec<Segment> {
     let frame = ((0.020 * sr as f64) as usize).max(2);
     let hop = ((0.010 * sr as f64) as usize).max(1);
     let rms = frame_rms(x, frame, hop);
-    if rms.is_empty() {
+    let runs = energy_runs(x.len(), &rms, hop, frame);
+    if runs.is_empty() {
         return vec![Segment::with_class(0, x.len() as i64, "SIL", Class::Silence)];
     }
-
-    let mut sorted = rms.clone();
-    sorted.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
-    let peak = sorted[sorted.len() - 1];
-    let floor = sorted[sorted.len() / 10]; // 10th percentile as the noise floor
-    let threshold = (floor + 0.08 * (peak - floor)).max(1e-4);
-
-    let speech: Vec<bool> = rms.iter().map(|v| *v > threshold).collect();
-
-    let mut segments = Vec::new();
-    let mut start_frame = 0usize;
-    let mut current = speech[0];
-    for i in 1..speech.len() {
-        if speech[i] != current {
-            push_segment(&mut segments, x.len(), start_frame, i, hop, frame, current);
-            start_frame = i;
-            current = speech[i];
-        }
-    }
-    push_segment(
-        &mut segments,
-        x.len(),
-        start_frame,
-        speech.len(),
-        hop,
-        frame,
-        current,
-    );
-    segments
+    runs.into_iter()
+        .map(|(start, end, speech)| {
+            if speech {
+                Segment::with_class(start, end, "SP", Class::Speech)
+            } else {
+                Segment::with_class(start, end, "SIL", Class::Silence)
+            }
+        })
+        .collect()
 }
 
-fn push_segment(
-    segments: &mut Vec<Segment>,
-    x_len: usize,
-    first_frame: usize,
-    last_frame: usize,
-    hop: usize,
-    frame: usize,
-    speech: bool,
-) {
-    let start = (first_frame * hop) as i64;
-    let end = ((last_frame.saturating_sub(1)) * hop + frame).min(x_len) as i64;
-    if end <= start {
-        return;
+/// Silence runs longer than `min_silence_s`, as flat `[start, end, start, end,
+/// ...]` sample positions.
+///
+/// This is the playback-side counterpart of [`align_by_energy`]: it works on the
+/// `f32` samples directly and returns only the zones to skip, so the caller never
+/// holds a full-length `f64` copy or the segment list.
+pub fn silence_zones_f32(x: &[f32], sr: u32, min_silence_s: f64) -> Vec<f64> {
+    let frame = ((0.020 * sr as f64) as usize).max(2);
+    let hop = ((0.010 * sr as f64) as usize).max(1);
+    let rms = frame_rms_f32(x, frame, hop);
+    let runs = energy_runs(x.len(), &rms, hop, frame);
+    let min_len = min_silence_s * sr as f64;
+    let mut zones = Vec::new();
+    for (start, end, speech) in runs {
+        if !speech && (end - start) as f64 > min_len {
+            zones.push(start as f64);
+            zones.push(end as f64);
+        }
     }
-    let (label, cls) = if speech {
-        ("SP", Class::Speech)
-    } else {
-        ("SIL", Class::Silence)
-    };
-    segments.push(Segment::with_class(start, end, label, cls));
+    zones
 }
 
 /// Class-aware rate plan for a target `ratio` (`out/in`).

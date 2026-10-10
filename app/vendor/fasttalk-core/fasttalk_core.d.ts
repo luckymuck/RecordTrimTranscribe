@@ -18,6 +18,24 @@ export class BakedMap {
 }
 
 /**
+ * Input-to-output position map matching [`time_stretch_skip_silence`].
+ *
+ * Held as `(src_start, src_end, out_start, out_len)` per kept segment. The
+ * output is contiguous across kept segments, so a position inside a skipped gap
+ * maps to the shared boundary between its neighbours. Rates come from the same
+ * `class_rate` the render uses, so boundaries and audio cannot disagree.
+ */
+export class SkipBakedMap {
+    free(): void;
+    [Symbol.dispose](): void;
+    /**
+     * Output sample position for the given input sample position.
+     */
+    map_position(position: number): number;
+    constructor(samples: Float32Array, sample_rate: number, speed: number, class_aware: boolean, min_silence_s: number);
+}
+
+/**
  * Causal, real-time time-scale modification for interactive playback.
  */
 export class StreamStretcher {
@@ -39,6 +57,10 @@ export class StreamStretcher {
     push(samples: Float32Array): void;
     reset(): void;
     set_speed(speed: number): void;
+    /**
+     * Jump the input cursor forward, discarding buffered input (skip a silence).
+     */
+    skip_to(input_pos: number): void;
     readonly speed: number;
 }
 
@@ -46,6 +68,15 @@ export class StreamStretcher {
  * Summary of an analysis pass, returned as a small JSON object.
  */
 export function analyze(samples: Float32Array, sample_rate: number): string;
+
+/**
+ * Silence runs longer than `min_silence_s`, as flat `[start, end, ...]` sample
+ * positions.
+ *
+ * Runs on the `f32` samples directly so enabling skip-silence on a long
+ * recording never materialises a full-length `f64` copy.
+ */
+export function silence_zones(samples: Float32Array, sample_rate: number, min_silence_s: number): Float64Array;
 
 /**
  * Offline time-scale modification of a mono clip.
@@ -57,6 +88,16 @@ export function analyze(samples: Float32Array, sample_rate: number): string;
 export function time_stretch(samples: Float32Array, sample_rate: number, speed: number, class_aware: boolean): Float32Array;
 
 /**
+ * Offline render with silence longer than `min_silence_s` removed, then the rest
+ * stretched to `speed`.
+ *
+ * Each kept segment is rendered on its own and concatenated. The joins land at
+ * energy minima (that is what "silence" means), so they need no crossfade.
+ * Returns empty only when the whole recording is silence.
+ */
+export function time_stretch_skip_silence(samples: Float32Array, sample_rate: number, speed: number, class_aware: boolean, min_silence_s: number): Float32Array;
+
+/**
  * Crate version, useful for cache-busting the WASM in the client.
  */
 export function version(): string;
@@ -66,10 +107,14 @@ export type InitInput = RequestInfo | URL | Response | BufferSource | WebAssembl
 export interface InitOutput {
     readonly memory: WebAssembly.Memory;
     readonly __wbg_bakedmap_free: (a: number, b: number) => void;
+    readonly __wbg_skipbakedmap_free: (a: number, b: number) => void;
     readonly __wbg_streamstretcher_free: (a: number, b: number) => void;
     readonly analyze: (a: number, b: number, c: number) => [number, number];
     readonly bakedmap_map_position: (a: number, b: number) => number;
     readonly bakedmap_new: (a: number, b: number, c: number, d: number, e: number) => number;
+    readonly silence_zones: (a: number, b: number, c: number, d: number) => [number, number];
+    readonly skipbakedmap_map_position: (a: number, b: number) => number;
+    readonly skipbakedmap_new: (a: number, b: number, c: number, d: number, e: number, f: number) => number;
     readonly streamstretcher_available_output: (a: number) => number;
     readonly streamstretcher_finish: (a: number) => void;
     readonly streamstretcher_new: (a: number, b: number) => number;
@@ -77,8 +122,10 @@ export interface InitOutput {
     readonly streamstretcher_push: (a: number, b: number, c: number) => void;
     readonly streamstretcher_reset: (a: number) => void;
     readonly streamstretcher_set_speed: (a: number, b: number) => void;
+    readonly streamstretcher_skip_to: (a: number, b: number) => void;
     readonly streamstretcher_speed: (a: number) => number;
     readonly time_stretch: (a: number, b: number, c: number, d: number, e: number) => [number, number];
+    readonly time_stretch_skip_silence: (a: number, b: number, c: number, d: number, e: number, f: number) => [number, number];
     readonly version: () => [number, number];
     readonly __wbindgen_externrefs: WebAssembly.Table;
     readonly __wbindgen_malloc: (a: number, b: number) => number;

@@ -37,12 +37,28 @@ export class Player {
     this.activeSpeed = 1;
     this.requestedSpeed = 1;
     this.finished = false;
+    this.skipMap = [];
+    this.skipIdx = 0;
   }
 
   setSource(pcm, sampleRate) {
     this.stop();
     this.pcm = pcm;
     this.sr = sampleRate;
+  }
+
+  /**
+   * Zones to jump over during playback, as `{start, end}` in input samples.
+   * Sorted defensively so the binary search can assume order.
+   */
+  setSkipMap(zones) {
+    this.skipMap = Array.isArray(zones)
+      ? zones
+          .filter((z) => z && z.end > z.start)
+          .map((z) => ({ start: z.start, end: z.end }))
+          .sort((a, b) => a.start - b.start)
+      : [];
+    this.skipIdx = 0;
   }
 
   play(fromSample, speed) {
@@ -112,7 +128,19 @@ export class Player {
 
   _tick() {
     if (!this.playing) return;
-    const now = this.ctx.currentTime;
+    let now = this.ctx.currentTime;
+
+    // Skip silence before scheduling, so this same tick re-renders from the end
+    // of the zone and the graph never actually plays the gap.
+    if (this.skipMap.length) {
+      const pos0 = this._position(now);
+      const zone = this._skipZoneAt(pos0);
+      if (zone) {
+        this._skipTo(zone.end);
+        now = this.ctx.currentTime;
+      }
+    }
+
     if (this.scheduleTime < now + MIN_LEAD) {
       this.scheduleTime = now + MIN_LEAD;
     }
@@ -141,12 +169,58 @@ export class Player {
       this.sources.push(node);
       this.scheduleTime += chunk.length / this.sr;
     }
+    this.onPosition(this._position(now));
+  }
+
+  /** Input-domain playhead position at audio time `now`. */
+  _position(now) {
     const elapsed = Math.max(0, now - this.timeStart);
-    const pos = Math.min(
+    return Math.min(
       this.pcm.length,
       this.srcStart + elapsed * this.sr * this.activeSpeed
     );
-    this.onPosition(pos);
+  }
+
+  /** The zone containing `pos`, or null. Zones are sorted by start. */
+  _skipZoneAt(pos) {
+    const zones = this.skipMap;
+    let lo = 0;
+    let hi = zones.length - 1;
+    let found = -1;
+    while (lo <= hi) {
+      const mid = (lo + hi) >> 1;
+      if (zones[mid].start <= pos) {
+        found = mid;
+        lo = mid + 1;
+      } else {
+        hi = mid - 1;
+      }
+    }
+    if (found < 0) return null;
+    const zone = zones[found];
+    return pos < zone.end ? zone : null;
+  }
+
+  /**
+   * Jump the playhead to `sample`, dropping the scheduled audio and the engine's
+   * input cursor. The cut lands inside a silence zone, so it is inaudible.
+   */
+  _skipTo(sample) {
+    for (const n of this.sources) {
+      try {
+        n.stop();
+      } catch (e) {}
+      try {
+        n.disconnect();
+      } catch (e) {}
+    }
+    this.sources = [];
+    if (this.stretcher) this.stretcher.skip_to(sample);
+    this.srcCursor = sample;
+    this.srcStart = sample;
+    this.timeStart = this.ctx.currentTime;
+    this.scheduleTime = this.ctx.currentTime + MIN_LEAD;
+    this.finished = false;
   }
 
   _scheduleEnd() {

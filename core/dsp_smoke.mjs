@@ -47,5 +47,39 @@ check(
   `(${out.length} vs ${n / 2})`
 );
 
+// Skip-silence: speech, 1.5 s gap, speech.
+const gap = sr * 1.5;
+const z = new Float32Array(n * 2 + gap);
+z.set(x, 0);
+z.set(x, n + gap);
+const zones = dsp.silence_zones(z, sr, 0.5);
+check("silence_zones finds the gap", zones.length === 2, `(${zones.length})`);
+
+const zs = dsp.time_stretch_skip_silence(z, sr, 2.0, false, 0.5);
+check(
+  "skip-silence render drops the gap",
+  zs.length > 0 && zs.length < z.length / 2,
+  `(${zs.length} vs ${z.length})`
+);
+check("skip-silence render finite", zs.every((v) => Number.isFinite(v)));
+
+const map = new dsp.SkipBakedMap(z, sr, 2.0, false, 0.5);
+const mapped = map.map_position(z.length);
+check(
+  "SkipBakedMap end matches render length",
+  Math.abs(mapped - zs.length) < 2,
+  `(${mapped} vs ${zs.length})`
+);
+map.free();
+
+// Streaming skip_to must not throw and must keep producing audio.
+const s2 = new dsp.StreamStretcher(sr, 2.0);
+s2.push(x);
+s2.skip_to(sr);
+s2.push(x);
+s2.finish();
+const out2 = s2.pull(n);
+check("streaming skip_to produces audio", out2.length > 0 && out2.every((v) => Number.isFinite(v)));
+
 console.log(ok ? "\nALL OK" : "\nFAILURES");
 process.exit(ok ? 0 : 1);

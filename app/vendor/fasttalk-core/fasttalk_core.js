@@ -44,6 +44,52 @@ export class BakedMap {
 if (Symbol.dispose) BakedMap.prototype[Symbol.dispose] = BakedMap.prototype.free;
 
 /**
+ * Input-to-output position map matching [`time_stretch_skip_silence`].
+ *
+ * Held as `(src_start, src_end, out_start, out_len)` per kept segment. The
+ * output is contiguous across kept segments, so a position inside a skipped gap
+ * maps to the shared boundary between its neighbours. Rates come from the same
+ * `class_rate` the render uses, so boundaries and audio cannot disagree.
+ */
+export class SkipBakedMap {
+    __destroy_into_raw() {
+        const ptr = this.__wbg_ptr;
+        this.__wbg_ptr = 0;
+        SkipBakedMapFinalization.unregister(this);
+        return ptr;
+    }
+    free() {
+        const ptr = this.__destroy_into_raw();
+        wasm.__wbg_skipbakedmap_free(ptr, 0);
+    }
+    /**
+     * Output sample position for the given input sample position.
+     * @param {number} position
+     * @returns {number}
+     */
+    map_position(position) {
+        const ret = wasm.skipbakedmap_map_position(this.__wbg_ptr, position);
+        return ret;
+    }
+    /**
+     * @param {Float32Array} samples
+     * @param {number} sample_rate
+     * @param {number} speed
+     * @param {boolean} class_aware
+     * @param {number} min_silence_s
+     */
+    constructor(samples, sample_rate, speed, class_aware, min_silence_s) {
+        const ptr0 = passArrayF32ToWasm0(samples, wasm.__wbindgen_malloc);
+        const len0 = WASM_VECTOR_LEN;
+        const ret = wasm.skipbakedmap_new(ptr0, len0, sample_rate, speed, class_aware, min_silence_s);
+        this.__wbg_ptr = ret;
+        SkipBakedMapFinalization.register(this, this.__wbg_ptr, this);
+        return this;
+    }
+}
+if (Symbol.dispose) SkipBakedMap.prototype[Symbol.dispose] = SkipBakedMap.prototype.free;
+
+/**
  * Causal, real-time time-scale modification for interactive playback.
  */
 export class StreamStretcher {
@@ -110,6 +156,13 @@ export class StreamStretcher {
         wasm.streamstretcher_set_speed(this.__wbg_ptr, speed);
     }
     /**
+     * Jump the input cursor forward, discarding buffered input (skip a silence).
+     * @param {number} input_pos
+     */
+    skip_to(input_pos) {
+        wasm.streamstretcher_skip_to(this.__wbg_ptr, input_pos);
+    }
+    /**
      * @returns {number}
      */
     get speed() {
@@ -141,6 +194,26 @@ export function analyze(samples, sample_rate) {
 }
 
 /**
+ * Silence runs longer than `min_silence_s`, as flat `[start, end, ...]` sample
+ * positions.
+ *
+ * Runs on the `f32` samples directly so enabling skip-silence on a long
+ * recording never materialises a full-length `f64` copy.
+ * @param {Float32Array} samples
+ * @param {number} sample_rate
+ * @param {number} min_silence_s
+ * @returns {Float64Array}
+ */
+export function silence_zones(samples, sample_rate, min_silence_s) {
+    const ptr0 = passArrayF32ToWasm0(samples, wasm.__wbindgen_malloc);
+    const len0 = WASM_VECTOR_LEN;
+    const ret = wasm.silence_zones(ptr0, len0, sample_rate, min_silence_s);
+    var v2 = getArrayF64FromWasm0(ret[0], ret[1]).slice();
+    wasm.__wbindgen_free(ret[0], ret[1] * 8, 8);
+    return v2;
+}
+
+/**
  * Offline time-scale modification of a mono clip.
  *
  * `class_aware` uses an energy-based silence/speech segmentation to allocate the
@@ -156,6 +229,29 @@ export function time_stretch(samples, sample_rate, speed, class_aware) {
     const ptr0 = passArrayF32ToWasm0(samples, wasm.__wbindgen_malloc);
     const len0 = WASM_VECTOR_LEN;
     const ret = wasm.time_stretch(ptr0, len0, sample_rate, speed, class_aware);
+    var v2 = getArrayF32FromWasm0(ret[0], ret[1]).slice();
+    wasm.__wbindgen_free(ret[0], ret[1] * 4, 4);
+    return v2;
+}
+
+/**
+ * Offline render with silence longer than `min_silence_s` removed, then the rest
+ * stretched to `speed`.
+ *
+ * Each kept segment is rendered on its own and concatenated. The joins land at
+ * energy minima (that is what "silence" means), so they need no crossfade.
+ * Returns empty only when the whole recording is silence.
+ * @param {Float32Array} samples
+ * @param {number} sample_rate
+ * @param {number} speed
+ * @param {boolean} class_aware
+ * @param {number} min_silence_s
+ * @returns {Float32Array}
+ */
+export function time_stretch_skip_silence(samples, sample_rate, speed, class_aware, min_silence_s) {
+    const ptr0 = passArrayF32ToWasm0(samples, wasm.__wbindgen_malloc);
+    const len0 = WASM_VECTOR_LEN;
+    const ret = wasm.time_stretch_skip_silence(ptr0, len0, sample_rate, speed, class_aware, min_silence_s);
     var v2 = getArrayF32FromWasm0(ret[0], ret[1]).slice();
     wasm.__wbindgen_free(ret[0], ret[1] * 4, 4);
     return v2;
@@ -202,6 +298,9 @@ function __wbg_get_imports() {
 const BakedMapFinalization = (typeof FinalizationRegistry === 'undefined')
     ? { register: () => {}, unregister: () => {} }
     : new FinalizationRegistry(ptr => wasm.__wbg_bakedmap_free(ptr, 1));
+const SkipBakedMapFinalization = (typeof FinalizationRegistry === 'undefined')
+    ? { register: () => {}, unregister: () => {} }
+    : new FinalizationRegistry(ptr => wasm.__wbg_skipbakedmap_free(ptr, 1));
 const StreamStretcherFinalization = (typeof FinalizationRegistry === 'undefined')
     ? { register: () => {}, unregister: () => {} }
     : new FinalizationRegistry(ptr => wasm.__wbg_streamstretcher_free(ptr, 1));
@@ -211,12 +310,25 @@ function getArrayF32FromWasm0(ptr, len) {
     return getFloat32ArrayMemory0().subarray(ptr / 4, ptr / 4 + len);
 }
 
+function getArrayF64FromWasm0(ptr, len) {
+    ptr = ptr >>> 0;
+    return getFloat64ArrayMemory0().subarray(ptr / 8, ptr / 8 + len);
+}
+
 let cachedFloat32ArrayMemory0 = null;
 function getFloat32ArrayMemory0() {
     if (cachedFloat32ArrayMemory0 === null || cachedFloat32ArrayMemory0.byteLength === 0) {
         cachedFloat32ArrayMemory0 = new Float32Array(wasm.memory.buffer);
     }
     return cachedFloat32ArrayMemory0;
+}
+
+let cachedFloat64ArrayMemory0 = null;
+function getFloat64ArrayMemory0() {
+    if (cachedFloat64ArrayMemory0 === null || cachedFloat64ArrayMemory0.byteLength === 0) {
+        cachedFloat64ArrayMemory0 = new Float64Array(wasm.memory.buffer);
+    }
+    return cachedFloat64ArrayMemory0;
 }
 
 function getStringFromWasm0(ptr, len) {
@@ -260,6 +372,7 @@ function __wbg_finalize_init(instance, module) {
     wasm = instance.exports;
     wasmModule = module;
     cachedFloat32ArrayMemory0 = null;
+    cachedFloat64ArrayMemory0 = null;
     cachedUint8ArrayMemory0 = null;
     wasm.__wbindgen_start();
     return wasm;

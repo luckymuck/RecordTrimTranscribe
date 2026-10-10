@@ -9,7 +9,7 @@
 
 use wasm_bindgen::prelude::*;
 
-use crate::classes::Class;
+use crate::classes::{profile_for, Class};
 use crate::engines::{hybrid, psola};
 use crate::rate;
 use crate::timing::TimeMap;
@@ -21,6 +21,50 @@ fn to_f64(samples: &[f32]) -> Vec<f64> {
 /// Ratio (`out/in`) for a requested speed-up (`speed >= 1` means faster).
 fn ratio_for_speed(speed: f64) -> f64 {
     (1.0 / speed.max(1e-3)).clamp(1e-3, 1.0)
+}
+
+/// The rate a class is rendered at, mirroring `rate::plan_rates` exactly.
+///
+/// Skip-silence derives both the rendered audio and its position map from this
+/// one function so the two cannot drift apart: a map built on a different rate
+/// than the render silently shifts every clip boundary.
+fn class_rate(cls: Class, ratio: f64) -> f64 {
+    let profile = profile_for(cls);
+    (ratio * profile.multiplier).clamp(profile.floor, 1.0)
+}
+
+/// Keep-list for a skip-silence render: every segment except silence runs longer
+/// than `min_silence_s`, each as `(start, end, rate)`.
+fn skip_keep_list(
+    segments: &[crate::timing::Segment],
+    sr: u32,
+    ratio: f64,
+    class_aware: bool,
+    min_silence_s: f64,
+) -> Vec<(i64, i64, f64)> {
+    segments
+        .iter()
+        .filter_map(|seg| {
+            let seconds = (seg.end - seg.start) as f64 / sr as f64;
+            if seg.cls == Class::Silence && seconds > min_silence_s {
+                return None;
+            }
+            let rate = if class_aware {
+                class_rate(seg.cls, ratio)
+            } else {
+                ratio
+            };
+            Some((seg.start, seg.end, rate))
+        })
+        .collect()
+}
+
+/// Render one kept span at a constant `rate` using the hybrid engine.
+fn stretch_span(x: &[f64], rate: f64, sr: u32) -> Vec<f64> {
+    let rate = rate.clamp(1e-3, 1.0);
+    let tm = TimeMap::uniform(x.len() as i64, rate).expect("rate is in (0,1]");
+    let rates = hybrid::uniform_rate_plan(x.len() as i64, rate);
+    hybrid::render(x, &tm, &rates, sr)
 }
 
 /// Crate version, useful for cache-busting the WASM in the client.
@@ -85,6 +129,51 @@ pub fn analyze(samples: &[f32], sample_rate: u32) -> String {
     )
 }
 
+/// Silence runs longer than `min_silence_s`, as flat `[start, end, ...]` sample
+/// positions.
+///
+/// Runs on the `f32` samples directly so enabling skip-silence on a long
+/// recording never materialises a full-length `f64` copy.
+#[wasm_bindgen]
+pub fn silence_zones(samples: &[f32], sample_rate: u32, min_silence_s: f64) -> Vec<f64> {
+    rate::silence_zones_f32(samples, sample_rate, min_silence_s)
+}
+
+/// Offline render with silence longer than `min_silence_s` removed, then the rest
+/// stretched to `speed`.
+///
+/// Each kept segment is rendered on its own and concatenated. The joins land at
+/// energy minima (that is what "silence" means), so they need no crossfade.
+/// Returns empty only when the whole recording is silence.
+#[wasm_bindgen]
+pub fn time_stretch_skip_silence(
+    samples: &[f32],
+    sample_rate: u32,
+    speed: f64,
+    class_aware: bool,
+    min_silence_s: f64,
+) -> Vec<f32> {
+    let x = to_f64(samples);
+    if x.len() < 2 {
+        return samples.to_vec();
+    }
+    let ratio = ratio_for_speed(speed);
+    let segments = rate::align_by_energy(&x, sample_rate);
+    let keep = skip_keep_list(&segments, sample_rate, ratio, class_aware, min_silence_s);
+
+    let mut out: Vec<f32> = Vec::new();
+    for (start, end, rate) in keep {
+        let a = start.max(0) as usize;
+        let b = (end.min(x.len() as i64)).max(a as i64) as usize;
+        if b <= a {
+            continue;
+        }
+        let rendered = stretch_span(&x[a..b], rate, sample_rate);
+        out.extend(rendered.into_iter().map(|v| v as f32));
+    }
+    out
+}
+
 /// A reusable input-to-output position map for one baked render.
 ///
 /// This makes speed-baked clip exports use the same map the audio render uses,
@@ -113,6 +202,63 @@ impl BakedMap {
     /// Output sample position for the given input sample position.
     pub fn map_position(&self, position: f64) -> f64 {
         self.map.output_at(position)
+    }
+}
+
+/// Input-to-output position map matching [`time_stretch_skip_silence`].
+///
+/// Held as `(src_start, src_end, out_start, out_len)` per kept segment. The
+/// output is contiguous across kept segments, so a position inside a skipped gap
+/// maps to the shared boundary between its neighbours. Rates come from the same
+/// `class_rate` the render uses, so boundaries and audio cannot disagree.
+#[wasm_bindgen]
+pub struct SkipBakedMap {
+    kept: Vec<(i64, i64, f64, f64)>,
+    total: f64,
+}
+
+#[wasm_bindgen]
+impl SkipBakedMap {
+    #[wasm_bindgen(constructor)]
+    pub fn new(
+        samples: &[f32],
+        sample_rate: u32,
+        speed: f64,
+        class_aware: bool,
+        min_silence_s: f64,
+    ) -> SkipBakedMap {
+        let x = to_f64(samples);
+        let ratio = ratio_for_speed(speed);
+        let segments = rate::align_by_energy(&x, sample_rate);
+        let keep = skip_keep_list(&segments, sample_rate, ratio, class_aware, min_silence_s);
+
+        let mut kept = Vec::with_capacity(keep.len());
+        let mut out_pos = 0.0f64;
+        for (start, end, rate) in keep {
+            let src_len = (end - start).max(1);
+            let out_len =
+                TimeMap::uniform(src_len, rate.clamp(1e-3, 1.0)).unwrap().out_length() as f64;
+            kept.push((start, end, out_pos, out_len));
+            out_pos += out_len;
+        }
+        SkipBakedMap { kept, total: out_pos }
+    }
+
+    /// Output sample position for the given input sample position.
+    pub fn map_position(&self, position: f64) -> f64 {
+        for (src_start, src_end, out_start, out_len) in &self.kept {
+            let src_start = *src_start as f64;
+            let src_end = *src_end as f64;
+            if position < src_start {
+                // Inside a skipped gap (or before the first kept segment).
+                return *out_start;
+            }
+            if position < src_end {
+                let t = (position - src_start) / (src_end - src_start);
+                return *out_start + t * *out_len;
+            }
+        }
+        self.total
     }
 }
 
@@ -156,6 +302,11 @@ impl StreamStretcher {
 
     pub fn reset(&mut self) {
         self.inner.reset();
+    }
+
+    /// Jump the input cursor forward, discarding buffered input (skip a silence).
+    pub fn skip_to(&mut self, input_pos: f64) {
+        self.inner.skip_to(input_pos);
     }
 
     /// Signal that no more input will be pushed.
