@@ -75,7 +75,7 @@ export function analyzeClip(pcm, sampleRate) {
  * The caller must call `dispose()` when finished.
  */
 export function makeBakedMap(pcm, sampleRate, speed, classAware) {
-  const map = BakedMap.new(pcm, sampleRate, speed, classAware);
+  const map = new BakedMap(pcm, sampleRate, speed, classAware);
   return {
     mapSample: (sample) => Math.round(map.map_position(sample)),
     dispose: () => map.free(),
@@ -87,7 +87,7 @@ export function makeBakedMap(pcm, sampleRate, speed, classAware) {
  * The caller must call `dispose()` when finished.
  */
 export function makeSkipBakedMap(pcm, sampleRate, speed, classAware, minSilenceS, keepSilenceS) {
-  const map = SkipBakedMap.new(pcm, sampleRate, speed, classAware, minSilenceS, keepSilenceS);
+  const map = new SkipBakedMap(pcm, sampleRate, speed, classAware, minSilenceS, keepSilenceS);
   return {
     mapSample: (sample) => Math.round(map.map_position(sample)),
     dispose: () => map.free(),
