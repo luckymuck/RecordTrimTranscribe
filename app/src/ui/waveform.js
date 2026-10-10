@@ -260,6 +260,9 @@ export class WaveformView {
         ctx.fillRect(x, y0, 1, Math.max(1, y1 - y0));
       }
     } else {
+      // Zoomed in past the bucket size: draw the raw samples as a line. The
+      // stroke style is set here because the centre line above left it grey.
+      ctx.strokeStyle = "#5eead4";
       ctx.beginPath();
       for (let x = 0; x < w; x++) {
         const s = Math.floor(this.viewStart + x * spp);

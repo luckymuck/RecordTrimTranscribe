@@ -27,6 +27,48 @@ const recorder = new Recorder();
 let recTimer = null;
 let transcribing = false;
 
+// ── Busy overlay ──────────────────────────────────────────────────────────────
+// Shown while a file is decoded or an export is rendered. The spinner animates
+// with a transform, so it keeps turning even while the main thread is blocked.
+function showBusy(text) {
+  const textEl = $("busyText");
+  if (textEl) textEl.textContent = text || "Working…";
+  const el = $("busy");
+  if (el) el.classList.add("on");
+}
+
+function hideBusy() {
+  const el = $("busy");
+  if (el) el.classList.remove("on");
+}
+
+/** Resolve once the browser has painted, so the overlay is visible before work. */
+function nextPaint() {
+  return new Promise((resolve) => {
+    let done = false;
+    const finish = () => {
+      if (!done) {
+        done = true;
+        resolve();
+      }
+    };
+    // rAF does not fire in a hidden tab, so fall back to a timer.
+    requestAnimationFrame(() => requestAnimationFrame(finish));
+    setTimeout(finish, 60);
+  });
+}
+
+/** Run `work` with the overlay up, giving the browser a frame to show it first. */
+async function withBusy(text, work) {
+  showBusy(text);
+  await nextPaint();
+  try {
+    return await work();
+  } finally {
+    hideBusy();
+  }
+}
+
 const waveform = new WaveformView({
   main: $("mainwave"),
   overview: $("overview"),
@@ -208,6 +250,7 @@ function setSource(pcm, sampleRate, label) {
   waveform.setData(pcm, sampleRate);
   player.setSource(pcm, sampleRate);
   silenceZoneCache = null;
+  clearRenderCache();
   applySkipSilence();
   $("fileMeta").textContent = `${label} · ${(pcm.length / sampleRate).toFixed(1)}s @ ${sampleRate} Hz`;
   enableCards(true);
@@ -408,7 +451,7 @@ $("stopRecBtn").addEventListener("click", async () => {
   $("meterFill").style.width = "0%";
   let decoded = null;
   try {
-    decoded = await recorder.stop();
+    decoded = await withBusy("Finishing recording…", () => recorder.stop());
   } catch (err) {
     setRecordingUi(false);
     alert("Could not finish the recording: " + err.message);
@@ -431,8 +474,10 @@ $("fileInput").addEventListener("change", async (e) => {
     return;
   }
   try {
-    const d = await decodeAudioBlob(file);
-    setSource(d.pcm, d.sampleRate, file.name);
+    await withBusy(`Loading ${file.name}…`, async () => {
+      const d = await decodeAudioBlob(file);
+      setSource(d.pcm, d.sampleRate, file.name);
+    });
   } catch (err) {
     alert("Could not decode file: " + err.message);
   }
@@ -484,6 +529,7 @@ $("normBtn").addEventListener("click", async () => {
   waveform.refreshData(out, state.sampleRate);
   player.setSource(out, state.sampleRate);
   silenceZoneCache = null;
+  clearRenderCache();
   applySkipSilence();
   markUnsaved();
   persistAutosave();
@@ -576,18 +622,20 @@ document.addEventListener("keydown", (e) => {
   });
 }
 
-$("saveBackup").addEventListener("click", () => {
+$("saveBackup").addEventListener("click", async () => {
   if (!state.pcm) {
     alert("Nothing to save yet.");
     return;
   }
-  try {
-    const out = encode(state.pcm, state.sampleRate, "wav");
-    downloadBlob(out, `${(state.sourceName || "recording").replace(/\..+$/, "")}-backup.wav`);
-    markSaved();
-  } catch (err) {
-    $("saveStatus").textContent = `Backup failed: ${err.message}`;
-  }
+  await withBusy("Saving backup…", async () => {
+    try {
+      const out = encode(state.pcm, state.sampleRate, "wav");
+      downloadBlob(out, `${(state.sourceName || "recording").replace(/\..+$/, "")}-backup.wav`);
+      markSaved();
+    } catch (err) {
+      $("saveStatus").textContent = `Backup failed: ${err.message}`;
+    }
+  });
 });
 
 // While Whisper is running, lock source-changing controls so playback and
@@ -816,17 +864,22 @@ function renderClipList() {
         <button title="Export this clip">⬇</button>`;
       const nameField = row.querySelector("input");
       if (names[i] != null && names[i] !== "") nameField.value = names[i];
-    row.querySelector("button").addEventListener("click", () => {
+    row.querySelector("button").addEventListener("click", async () => {
         const name = nameField.value || `clip-${i + 1}`;
         const fmtSel = $("exportFormat").value;
-        try {
-          const range = mapClipForExport(c);
-          if (range.end > range.start) {
-            exportSlice(range.pcm, state.sampleRate, range.start, range.end, fmtSel, `${name}.${fmtSel}`);
+        await withBusy(`Exporting ${name}…`, async () => {
+          try {
+            const range = mapClipForExport(c);
+            if (range.end > range.start) {
+              exportSlice(range.pcm, state.sampleRate, range.start, range.end, fmtSel, `${name}.${fmtSel}`);
+              $("exportStatus").textContent = `Exported ${name}.${fmtSel}`;
+            } else {
+              $("exportStatus").textContent = "Clip is empty after baking — nothing to export";
+            }
+          } catch (err) {
+            $("exportStatus").textContent = `Export failed: ${err.message}`;
           }
-        } catch (err) {
-          $("exportStatus").textContent = `Export failed: ${err.message}`;
-        }
+        });
       });
       list.appendChild(row);
     });
@@ -864,11 +917,34 @@ function makeExportMap() {
   return null;
 }
 
+// The baked render is expensive, so cache it per export setting. Clip exports
+// then slice an already-rendered buffer instead of re-baking the whole file per
+// clip (which is slow and can outlast the click's user activation).
+let renderCache = { key: "", src: null };
+
+function renderKey() {
+  return [
+    state.pcm ? state.pcm.length : 0,
+    speedValue.toFixed(3),
+    $("classAware").checked ? 1 : 0,
+    skipSilence ? 1 : 0,
+    $("speedBaked").checked ? 1 : 0,
+  ].join("|");
+}
+
+function clearRenderCache() {
+  renderCache = { key: "", src: null };
+}
+
 /** Render source PCM for export, using the same DSP bake as playback exports. */
 function exportSource() {
   if (!state.pcm) return null;
+  const key = renderKey();
+  if (renderCache.key === key && renderCache.src) return renderCache.src;
+
+  let src;
   if (useSkipExport()) {
-    return {
+    src = {
       pcm: timeStretchSkipSilence(
         state.pcm,
         state.sampleRate,
@@ -879,14 +955,16 @@ function exportSource() {
       ),
       sampleRate: state.sampleRate,
     };
+  } else if (!useBakedExport()) {
+    src = { pcm: state.pcm, sampleRate: state.sampleRate };
+  } else {
+    src = {
+      pcm: player.bake(speedValue, $("classAware").checked),
+      sampleRate: state.sampleRate,
+    };
   }
-  if (!useBakedExport()) {
-    return { pcm: state.pcm, sampleRate: state.sampleRate };
-  }
-  return {
-    pcm: player.bake(speedValue, $("classAware").checked),
-    sampleRate: state.sampleRate,
-  };
+  renderCache = { key, src };
+  return src;
 }
 
 /**
@@ -915,55 +993,68 @@ $("speedBaked").addEventListener("change", refreshClipDurations);
 $("classAware").addEventListener("change", refreshClipDurations);
 $("skipSilence").addEventListener("click", () => setSkipSilence(!skipSilence));
 
-$("exportAll").addEventListener("click", () => {
+$("exportAll").addEventListener("click", async () => {
   if (!state.pcm) return;
   const fmtSel = $("exportFormat").value;
-  try {
-    const src = exportSource();
-    if (src.pcm.length === 0) {
-      $("exportStatus").textContent = "Nothing to export — no speech found";
-      return;
+  await withBusy("Exporting…", async () => {
+    try {
+      const src = exportSource();
+      if (src.pcm.length === 0) {
+        $("exportStatus").textContent = "Nothing to export — no speech found";
+        return;
+      }
+      const baked = useBakedExport();
+      const skip = useSkipExport();
+      const base = (state.sourceName || "recording").replace(/\s+/g, " ");
+      const suffix = skip ? "nosilence" : `${speedValue.toFixed(2)}x`;
+      const name = baked || skip ? `${base}-${suffix}` : base;
+      exportSlice(src.pcm, src.sampleRate, 0, src.pcm.length, fmtSel, `${name}.${fmtSel}`);
+      markSaved();
+      $("exportStatus").textContent = skip
+        ? `Exported whole file, silence removed, baked at ${speedValue.toFixed(2)}×`
+        : baked
+          ? `Exported whole file, speed-baked at ${speedValue.toFixed(2)}×`
+          : "Exported whole file";
+    } catch (err) {
+      $("exportStatus").textContent = `Export failed: ${err.message}`;
     }
-    const baked = useBakedExport();
-    const skip = useSkipExport();
-    const base = (state.sourceName || "recording").replace(/\s+/g, " ");
-    const suffix = skip ? "nosilence" : `${speedValue.toFixed(2)}x`;
-    const name = baked || skip ? `${base}-${suffix}` : base;
-    exportSlice(src.pcm, src.sampleRate, 0, src.pcm.length, fmtSel, `${name}.${fmtSel}`);
-    markSaved();
-    $("exportStatus").textContent = skip
-      ? `Exported whole file, silence removed, baked at ${speedValue.toFixed(2)}×`
-      : baked
-        ? `Exported whole file, speed-baked at ${speedValue.toFixed(2)}×`
-        : "Exported whole file";
-  } catch (err) {
-    $("exportStatus").textContent = `Export failed: ${err.message}`;
-  }
+  });
 });
 
-$("exportClips").addEventListener("click", () => {
+$("exportClips").addEventListener("click", async () => {
   if (!state.pcm) return;
   const fmtSel = $("exportFormat").value;
-  let ranges;
-  try {
-    const clips = buildClips(state.splits, state.pcm.length);
-    ranges = clips.map((clip) => mapClipForExport(clip));
-  } catch (err) {
-    $("exportStatus").textContent = `Export failed: ${err.message}`;
-    return;
-  }
-  ranges.forEach((range, i) => {
-    setTimeout(() => {
+  await withBusy("Exporting clips…", async () => {
+    let ranges;
+    try {
+      const clips = buildClips(state.splits, state.pcm.length);
+      ranges = clips.map((clip) => mapClipForExport(clip));
+    } catch (err) {
+      $("exportStatus").textContent = `Export failed: ${err.message}`;
+      return;
+    }
+    // Download inside this click's user activation. Staggering with setTimeout
+    // loses the activation and the browser then blocks the downloads.
+    let count = 0;
+    ranges.forEach((range, i) => {
       try {
         if (range.end > range.start) {
-          exportSlice(range.pcm, state.sampleRate, range.start, range.end, fmtSel, `clip-${String(i + 1).padStart(2, "0")}.${fmtSel}`);
+          exportSlice(
+            range.pcm,
+            state.sampleRate,
+            range.start,
+            range.end,
+            fmtSel,
+            `clip-${String(i + 1).padStart(2, "0")}.${fmtSel}`
+          );
+          count++;
         }
       } catch (err) {
         $("exportStatus").textContent = `Export failed: ${err.message}`;
       }
-    }, i * 250);
+    });
+    $("exportStatus").textContent = `Exported ${count} clip${count === 1 ? "" : "s"}`;
   });
-  $("exportStatus").textContent = `Exporting ${ranges.length} clip(s)…`;
 });
 
 // ── Boot ────────────────────────────────────────────────────────────────────
@@ -996,8 +1087,10 @@ window.addEventListener("beforeunload", (e) => {
         $("recoverYes").onclick = async () => {
           banner.style.display = "none";
           try {
-            const d = await decodeAudioBlob(rec.blob);
-            setSource(d.pcm, d.sampleRate, rec.name || "Recovered recording");
+            await withBusy("Recovering session…", async () => {
+              const d = await decodeAudioBlob(rec.blob);
+              setSource(d.pcm, d.sampleRate, rec.name || "Recovered recording");
+            });
           } catch (err) {
             alert("Could not recover the previous session: " + err.message);
           }

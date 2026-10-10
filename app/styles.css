@@ -165,3 +165,28 @@ select { background: var(--card2); color: var(--ink); border: 1px solid var(--li
   padding: 0.6rem 1rem; border-radius: 11px; font-size: 0.85rem;
   box-shadow: 0 10px 36px rgba(0, 0, 0, 0.6); max-width: 94vw;
 }
+
+/* Busy overlay: covers the UI while a file loads or an export renders. The
+   spinner animates via transform so it keeps turning even while the main
+   thread is busy baking audio. */
+.busy {
+  position: fixed; inset: 0; z-index: 1400; display: none;
+  align-items: center; justify-content: center;
+  background: rgba(8, 10, 15, 0.6); backdrop-filter: blur(1.5px);
+}
+.busy.on { display: flex; }
+.busy-box {
+  display: flex; align-items: center; gap: 0.7rem;
+  background: var(--card); border: 1px solid var(--line); color: var(--ink);
+  padding: 0.8rem 1.1rem; border-radius: 11px; font-size: 0.9rem;
+  box-shadow: 0 12px 40px rgba(0, 0, 0, 0.6);
+}
+.spinner {
+  width: 18px; height: 18px; flex-shrink: 0; border-radius: 50%;
+  border: 2.5px solid rgba(94, 234, 212, 0.25); border-top-color: var(--accent);
+  animation: spin 0.75s linear infinite;
+}
+@keyframes spin { to { transform: rotate(360deg); } }
+@media (prefers-reduced-motion: reduce) {
+  .spinner { animation-duration: 1.6s; }
+}
