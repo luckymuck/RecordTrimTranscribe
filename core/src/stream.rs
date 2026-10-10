@@ -25,9 +25,10 @@ const SP_S: f64 = 0.40;
 /// Long enough to mask a click when playback begins in arbitrary audio.
 const STARTUP_FADE_S: f64 = 0.02;
 /// Startup fade applied after a `skip_to` (seconds). The jump deliberately lands
-/// inside a quiet region, so a long fade is pointless and would swallow the
-/// silence kept at the trailing edge of the gap. Just enough to avoid a step.
-const SKIP_FADE_S: f64 = 0.002;
+/// inside a quiet region, so a long fade would swallow the silence kept at the
+/// trailing edge of the gap, but a very short one leaves a step. Sized to match
+/// the player's crossfade so the outgoing and incoming audio overlap cleanly.
+const SKIP_FADE_S: f64 = 0.005;
 
 pub struct StreamStretcher {
     sr: u32,

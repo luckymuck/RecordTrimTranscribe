@@ -33,6 +33,33 @@ fn class_rate(cls: Class, ratio: f64) -> f64 {
     (ratio * profile.multiplier).clamp(profile.floor, 1.0)
 }
 
+/// Join pieces with a short overlap crossfade. Without it the splice between the
+/// kept head and the kept tail of a gap is a step, heard as a click.
+const SKIP_CROSSFADE_S: f64 = 0.005;
+
+/// Overlap-crossfade length in render output samples.
+fn crossfade_samples(sr: u32) -> usize {
+    (SKIP_CROSSFADE_S * sr as f64) as usize
+}
+
+/// Append `rendered` to `out`, crossfading its first `xf` samples with the tail
+/// of `out` already there. Returns how many samples were absorbed by the
+/// crossfade, so the caller's position map can track the shortened output.
+fn append_crossfaded(out: &mut Vec<f32>, rendered: &[f64], xf: usize) -> usize {
+    if rendered.is_empty() {
+        return 0;
+    }
+    let overlap = xf.min(out.len()).min(rendered.len());
+    let tail = out.len() - overlap;
+    for i in 0..overlap {
+        let t = (i + 1) as f32 / (overlap + 1) as f32;
+        let prev = out[tail + i];
+        out[tail + i] = prev * (1.0 - t) + rendered[i] as f32 * t;
+    }
+    out.extend(rendered[overlap..].iter().map(|v| *v as f32));
+    overlap
+}
+
 /// Keep-list for a skip-silence render: every segment except silence runs longer
 /// than `min_silence_s`, each as `(start, end, rate)`.
 ///
@@ -182,6 +209,7 @@ pub fn time_stretch_skip_silence(
     let keep = skip_keep_list(&segments, sample_rate, ratio, class_aware, min_silence_s, keep_s);
 
     let mut out: Vec<f32> = Vec::new();
+    let xf = crossfade_samples(sample_rate);
     for (start, end, rate) in keep {
         let a = start.max(0) as usize;
         let b = (end.min(x.len() as i64)).max(a as i64) as usize;
@@ -189,7 +217,7 @@ pub fn time_stretch_skip_silence(
             continue;
         }
         let rendered = stretch_span(&x[a..b], rate, sample_rate);
-        out.extend(rendered.into_iter().map(|v| v as f32));
+        append_crossfaded(&mut out, &rendered, xf);
     }
     out
 }
@@ -255,12 +283,23 @@ impl SkipBakedMap {
 
         let mut kept = Vec::with_capacity(keep.len());
         let mut out_pos = 0.0f64;
+        let xf = crossfade_samples(sample_rate);
+        let mut first = true;
         for (start, end, rate) in keep {
             let src_len = (end - start).max(1);
             let out_len =
                 TimeMap::uniform(src_len, rate.clamp(1e-3, 1.0)).unwrap().out_length() as f64;
+            // The render overlap-crossfades each join, absorbing up to `xf`
+            // samples of this piece into the previous one's tail.
+            let overlap = if first {
+                0.0
+            } else {
+                (xf as f64).min(out_pos).min(out_len)
+            };
+            out_pos -= overlap;
             kept.push((start, end, out_pos, out_len));
             out_pos += out_len;
+            first = false;
         }
         SkipBakedMap { kept, total: out_pos }
     }

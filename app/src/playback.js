@@ -15,10 +15,11 @@ const OUT_CHUNK = 0.2; // seconds of output per rendered buffer
 // the backlog is dropped cleanly. Starting a buffer in the past makes it begin
 // immediately, which would overlap every queued buffer on top of each other.
 const MIN_LEAD = 0.05;
-// A skip-silence jump resumes almost immediately. The cut already happened at
-// "now", so any lead here is heard as a silent gap: use just enough to keep the
-// buffer from being scheduled in the past.
-const RESUME_LEAD = 0.005;
+// A skip-silence jump is a crossfade, not a cut-and-restart. The outgoing audio
+// ramps out over this window while the incoming audio starts immediately and
+// ramps in over the same window, so the two overlap. A hard cut leaves a step
+// (or, with a gap, a hole); an overlap blends the join instead.
+const CROSSFADE = 0.005;
 
 export class Player {
   constructor({ onPosition, onEnd } = {}) {
@@ -146,9 +147,9 @@ export class Player {
     }
 
     const t = this.ctx.currentTime;
-    // A jump resumes almost immediately so it is not heard as a pause; a stalled
-    // queue, by contrast, is dropped cleanly with the full lead.
-    const lead = resumed ? RESUME_LEAD : MIN_LEAD;
+    // A jump resumes immediately so its fade-in overlaps the outgoing fade-out
+    // (a crossfade); a stalled queue is dropped cleanly with the full lead.
+    const lead = resumed ? 0 : MIN_LEAD;
     if (this.scheduleTime < t + lead) {
       this.scheduleTime = t + lead;
     }
@@ -233,7 +234,7 @@ export class Player {
    * two must be decided together.
    */
   _skipTo(sample) {
-    this._dropSources(RESUME_LEAD);
+    this._dropSources(CROSSFADE);
     if (this.stretcher) this.stretcher.skip_to(sample);
     this.srcCursor = sample;
     this.srcStart = sample;

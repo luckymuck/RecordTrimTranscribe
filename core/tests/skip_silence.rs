@@ -112,9 +112,6 @@ fn skip_to_is_monotonic() {
     assert!((len - 4000).abs() < 300, "got {len}, skip was not clamped");
 }
 
-/// A jump must not fade the resumed audio in over the long startup ramp: the
-/// kept tail of a silence gap is short at speed, and a 20 ms fade would swallow
-/// most of it (the quiet speech at the edge of a pause).
 #[test]
 fn skip_to_resumes_without_a_long_fade() {
     let sr = 48000;
@@ -128,13 +125,38 @@ fn skip_to_resumes_without_a_long_fade() {
     let mut out = Vec::new();
     drain(&mut s, &mut out);
 
-    let probe = (0.005 * sr as f64) as usize; // 5 ms after the resume
+    // The resume fade is short (5 ms), not the 20 ms startup ramp.
+    let probe = (0.008 * sr as f64) as usize;
     assert!(out.len() > probe + 10, "too little output to probe");
     let level = out[probe].abs();
     assert!(
         level > 0.49,
-        "level at 5 ms after the jump was {level}; the long startup fade is back"
+        "level at 8 ms after the jump was {level}; the long startup fade is back"
     );
+}
+
+/// The head and tail of a gap are spliced in the export. Without a crossfade
+/// that join is a step, which is the click heard at the cut.
+#[test]
+fn skip_silence_export_joins_without_a_step() {
+    let sr = 48000;
+    // Loud tone, a quiet tone below the silence threshold, loud tone again. The
+    // quiet tone is kept as the head and tail, so the splice has real content.
+    let loud = tone(440.0, 0.5, sr, 0.3);
+    let quiet = tone(300.0, 1.5, sr, 0.025);
+    let mut x = Vec::new();
+    x.extend(&loud);
+    x.extend(&quiet);
+    x.extend(&loud);
+
+    let out = time_stretch_skip_silence(&x, sr, 1.0, false, 0.25, 0.2);
+    let max_step = out
+        .windows(2)
+        .map(|w| (w[1] - w[0]).abs())
+        .fold(0.0f32, f32::max);
+    // The loud tone's own step is ~0.017 and a hard splice of the quiet edges
+    // would step by up to ~0.05. The crossfade keeps it near the source.
+    assert!(max_step < 0.03, "export has a splice step of {max_step}");
 }
 
 #[test]
