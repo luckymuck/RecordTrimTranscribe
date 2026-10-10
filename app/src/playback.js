@@ -15,6 +15,10 @@ const OUT_CHUNK = 0.2; // seconds of output per rendered buffer
 // the backlog is dropped cleanly. Starting a buffer in the past makes it begin
 // immediately, which would overlap every queued buffer on top of each other.
 const MIN_LEAD = 0.05;
+// A skip-silence jump resumes almost immediately. The cut already happened at
+// "now", so any lead here is heard as a silent gap: use just enough to keep the
+// buffer from being scheduled in the past.
+const RESUME_LEAD = 0.005;
 
 export class Player {
   constructor({ onPosition, onEnd } = {}) {
@@ -128,23 +132,33 @@ export class Player {
 
   _tick() {
     if (!this.playing) return;
-    let now = this.ctx.currentTime;
+    const now = this.ctx.currentTime;
 
     // Skip silence before scheduling, so this same tick re-renders from the end
     // of the zone and the graph never actually plays the gap.
+    let resumed = false;
     if (this.skipMap.length) {
-      const pos0 = this._position(now);
-      const zone = this._skipZoneAt(pos0);
+      const zone = this._skipZoneAt(this._position(now));
       if (zone) {
         this._skipTo(zone.end);
-        now = this.ctx.currentTime;
+        resumed = true;
       }
     }
 
-    if (this.scheduleTime < now + MIN_LEAD) {
-      this.scheduleTime = now + MIN_LEAD;
+    const t = this.ctx.currentTime;
+    // A jump resumes almost immediately so it is not heard as a pause; a stalled
+    // queue, by contrast, is dropped cleanly with the full lead.
+    const lead = resumed ? RESUME_LEAD : MIN_LEAD;
+    if (this.scheduleTime < t + lead) {
+      this.scheduleTime = t + lead;
     }
-    const horizon = now + LOOKAHEAD;
+    if (resumed) {
+      // Anchor the playhead to when the resumed audio actually starts, otherwise
+      // it runs the lead ahead of what is heard.
+      this.timeStart = this.scheduleTime;
+    }
+
+    const horizon = t + LOOKAHEAD;
     let guard = 0;
     while (this.scheduleTime < horizon && guard < 50) {
       guard++;
@@ -169,7 +183,7 @@ export class Player {
       this.sources.push(node);
       this.scheduleTime += chunk.length / this.sr;
     }
-    this.onPosition(this._position(now));
+    this.onPosition(this._position(this.ctx.currentTime));
   }
 
   /** Input-domain playhead position at audio time `now`. */
@@ -204,6 +218,10 @@ export class Player {
   /**
    * Jump the playhead to `sample`, dropping the scheduled audio and the engine's
    * input cursor. The cut lands inside a silence zone, so it is inaudible.
+   *
+   * `scheduleTime` is zeroed rather than set here: the caller picks the resume
+   * lead (a jump wants a very short one) and anchors `timeStart` to it, so the
+   * two must be decided together.
    */
   _skipTo(sample) {
     for (const n of this.sources) {
@@ -218,8 +236,7 @@ export class Player {
     if (this.stretcher) this.stretcher.skip_to(sample);
     this.srcCursor = sample;
     this.srcStart = sample;
-    this.timeStart = this.ctx.currentTime;
-    this.scheduleTime = this.ctx.currentTime + MIN_LEAD;
+    this.scheduleTime = 0;
     this.finished = false;
   }
 
