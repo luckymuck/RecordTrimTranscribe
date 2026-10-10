@@ -118,9 +118,9 @@ fn silence_zones_finds_only_long_gaps() {
 
     let zones = silence_zones(&x, sr, 0.5, 0.2);
     assert_eq!(zones.len(), 2, "expected exactly one zone, got {zones:?}");
-    assert!((zones[0] - 24000.0).abs() < 2000.0, "zone start {}", zones[0]);
-    // The zone is trimmed by the kept 0.2 s, so it stops short of the speech.
-    assert!((zones[1] - 86400.0).abs() < 2000.0, "zone end {}", zones[1]);
+    // The kept 0.2 s is split evenly, so the zone is inset by 0.1 s on each side.
+    assert!((zones[0] - 28800.0).abs() < 2000.0, "zone start {}", zones[0]);
+    assert!((zones[1] - 91200.0).abs() < 2000.0, "zone end {}", zones[1]);
 
     // A threshold above the gap length yields nothing.
     assert!(silence_zones(&x, sr, 2.0, 0.2).is_empty());
@@ -177,13 +177,14 @@ fn skip_baked_map_agrees_with_the_render() {
 
     assert!(map.map_position(0.0).abs() < 1.0, "start should map to 0");
 
-    // Everything inside a skipped gap collapses to one boundary. The energy
-    // detector's boundary carries frame/hop resolution (~30 ms), so compare the
-    // probes to each other tightly and to the nominal boundary loosely.
-    let boundary = speech_len as f64 * 0.5;
+    // Everything inside the skipped middle collapses to the boundary between the
+    // kept head and the kept tail. The energy detector's boundary carries
+    // frame/hop resolution (~30 ms), so compare the probes to each other tightly
+    // and to the nominal boundary loosely.
+    let expected_boundary = (speech_len as f64 + 0.1 * sr as f64) * 0.5;
     let resolution = 0.035 * sr as f64;
-    // All three probes sit inside the skipped part (well before the kept pause).
-    let probes = [speech_len + 4800, speech_len + 24000, 60000];
+    // All three probes sit inside the skipped middle (between the two kept halves).
+    let probes = [40000, 60000, 80000];
     let mapped: Vec<f64> = probes.iter().map(|p| map.map_position(*p as f64)).collect();
     for (i, &got) in mapped.iter().enumerate() {
         assert!(
@@ -193,8 +194,8 @@ fn skip_baked_map_agrees_with_the_render() {
             mapped[0]
         );
         assert!(
-            (got - boundary).abs() < resolution,
-            "gap probe {} mapped to {got}, expected near {boundary}",
+            (got - expected_boundary).abs() < resolution,
+            "gap probe {} mapped to {got}, expected near {expected_boundary}",
             probes[i]
         );
     }

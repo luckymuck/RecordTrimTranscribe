@@ -138,24 +138,26 @@ pub fn align_by_energy(x: &[f64], sr: u32) -> Vec<Segment> {
 /// `f32` samples directly and returns only the zones to skip, so the caller never
 /// holds a full-length `f64` copy or the segment list.
 ///
-/// Each zone is trimmed by `keep_s` at its end, so a beat of silence is left
-/// before whatever follows and the next word stays easy to pick up.
+/// Each zone is trimmed by `keep_s`, split evenly between its start and its end,
+/// so a beat of silence survives on both sides. A boundary that lands a hair
+/// early or late can then no longer clip the words it separates.
 pub fn silence_zones_f32(x: &[f32], sr: u32, min_silence_s: f64, keep_s: f64) -> Vec<f64> {
     let frame = ((0.020 * sr as f64) as usize).max(2);
     let hop = ((0.010 * sr as f64) as usize).max(1);
     let rms = frame_rms_f32(x, frame, hop);
     let runs = energy_runs(x.len(), &rms, hop, frame);
     let min_len = min_silence_s * sr as f64;
-    let keep = (keep_s * sr as f64).max(0.0);
+    let half = (keep_s * sr as f64).max(0.0) / 2.0;
     let mut zones = Vec::new();
     for (start, end, speech) in runs {
         if speech || (end - start) as f64 <= min_len {
             continue;
         }
-        let stop = ((end as f64 - keep).max(start as f64)) as i64;
-        if stop > start {
-            zones.push(start as f64);
-            zones.push(stop as f64);
+        let skip_start = (start as f64 + half).min(end as f64);
+        let skip_end = (end as f64 - half).max(start as f64);
+        if skip_end > skip_start {
+            zones.push(skip_start);
+            zones.push(skip_end);
         }
     }
     zones

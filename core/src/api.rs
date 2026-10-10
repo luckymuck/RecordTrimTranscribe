@@ -36,10 +36,11 @@ fn class_rate(cls: Class, ratio: f64) -> f64 {
 /// Keep-list for a skip-silence render: every segment except silence runs longer
 /// than `min_silence_s`, each as `(start, end, rate)`.
 ///
-/// A long silence is not dropped outright: its last `keep_s` is retained as a
-/// pause so the following word is easier to pick up. `keep_s` is measured in
-/// source time (the 1.00x timeline) and rendered at the target `ratio`, so the
-/// pause shortens with the speed like everything else around it.
+/// A long silence is not dropped outright. Its `keep_s` is split between its
+/// start and its end, so the surviving pause brackets the words it separates and
+/// a detector boundary that lands a hair early or late cannot clip them.
+/// `keep_s` is measured in source time (the 1.00x timeline) and rendered at the
+/// target `ratio`, so the pause shortens with the speed like everything else.
 fn skip_keep_list(
     segments: &[crate::timing::Segment],
     sr: u32,
@@ -48,27 +49,29 @@ fn skip_keep_list(
     min_silence_s: f64,
     keep_s: f64,
 ) -> Vec<(i64, i64, f64)> {
-    let keep = (keep_s * sr as f64).round() as i64;
-    segments
-        .iter()
-        .filter_map(|seg| {
-            let seconds = (seg.end - seg.start) as f64 / sr as f64;
-            if seg.cls == Class::Silence && seconds > min_silence_s {
-                let start = (seg.end - keep).max(seg.start);
-                if start >= seg.end {
-                    return None;
-                }
-                // Scale with speed, so 0.1 s at 1.00x becomes 0.05 s at 2.00x.
-                return Some((start, seg.end, ratio));
+    let half = ((keep_s * sr as f64).round() as i64) / 2;
+    let mut keep = Vec::new();
+    for seg in segments {
+        let seconds = (seg.end - seg.start) as f64 / sr as f64;
+        if seg.cls == Class::Silence && seconds > min_silence_s {
+            let head_end = (seg.start + half).min(seg.end);
+            if head_end > seg.start {
+                keep.push((seg.start, head_end, ratio));
             }
-            let rate = if class_aware {
-                class_rate(seg.cls, ratio)
-            } else {
-                ratio
-            };
-            Some((seg.start, seg.end, rate))
-        })
-        .collect()
+            let tail_start = (seg.end - half).max(seg.start);
+            if seg.end > tail_start {
+                keep.push((tail_start, seg.end, ratio));
+            }
+            continue;
+        }
+        let rate = if class_aware {
+            class_rate(seg.cls, ratio)
+        } else {
+            ratio
+        };
+        keep.push((seg.start, seg.end, rate));
+    }
+    keep
 }
 
 /// Render one kept span at a constant `rate` using the hybrid engine.
