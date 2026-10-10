@@ -91,7 +91,7 @@ let speedValue = 1.0;
 // export. A short pause is left in its place so the next word stays easy to
 // pick up. That pause is source time at 1.00x; it shortens with the speed.
 const SKIP_MIN_S = 0.25;
-const SKIP_KEEP_S = 0.1;
+const SKIP_KEEP_S = 0.2;
 let skipSilence = false;
 let silenceZoneCache = null;
 

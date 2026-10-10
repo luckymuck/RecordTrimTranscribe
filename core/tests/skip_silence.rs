@@ -116,14 +116,14 @@ fn silence_zones_finds_only_long_gaps() {
     x.extend(vec![0.0f32; (1.5 * sr as f64) as usize]); // 1.5 s > 0.5 s
     x.extend(tone(140.0, 0.5, sr, 0.3));
 
-    let zones = silence_zones(&x, sr, 0.5, 0.1);
+    let zones = silence_zones(&x, sr, 0.5, 0.2);
     assert_eq!(zones.len(), 2, "expected exactly one zone, got {zones:?}");
     assert!((zones[0] - 24000.0).abs() < 2000.0, "zone start {}", zones[0]);
-    // The zone is trimmed by the kept 0.1 s, so it stops short of the speech.
-    assert!((zones[1] - 91200.0).abs() < 2000.0, "zone end {}", zones[1]);
+    // The zone is trimmed by the kept 0.2 s, so it stops short of the speech.
+    assert!((zones[1] - 86400.0).abs() < 2000.0, "zone end {}", zones[1]);
 
     // A threshold above the gap length yields nothing.
-    assert!(silence_zones(&x, sr, 2.0, 0.1).is_empty());
+    assert!(silence_zones(&x, sr, 2.0, 0.2).is_empty());
 }
 
 #[test]
@@ -135,10 +135,10 @@ fn skip_silence_export_cuts_the_gap_to_the_kept_pause() {
     x.extend(vec![0.0f32; (1.5 * sr as f64) as usize]); // 1.5 s > 0.5 s
     x.extend(&speech);
 
-    let out = time_stretch_skip_silence(&x, sr, 2.0, false, 0.5, 0.1);
-    // Two 0.5 s speech spans at 2x (~0.5 s) plus the kept 0.1 s pause, itself
+    let out = time_stretch_skip_silence(&x, sr, 2.0, false, 0.5, 0.2);
+    // Two 0.5 s speech spans at 2x (~0.5 s) plus the kept 0.2 s pause, itself
     // halved by the 2x speed. No-skip would be ~1.25 s.
-    let expected = (speech.len() * 2) as f64 * 0.5 + 0.1 * sr as f64 * 0.5;
+    let expected = (speech.len() * 2) as f64 * 0.5 + 0.2 * sr as f64 * 0.5;
     let got = out.len() as f64;
     assert!(
         (got - expected).abs() < 0.12 * expected,
@@ -151,10 +151,10 @@ fn skip_silence_export_cuts_the_gap_to_the_kept_pause() {
 fn skip_silence_export_of_pure_silence_leaves_the_kept_pause() {
     let sr = 48000;
     let x = vec![0.0f32; (2.0 * sr as f64) as usize];
-    let out = time_stretch_skip_silence(&x, sr, 2.0, false, 0.5, 0.1);
+    let out = time_stretch_skip_silence(&x, sr, 2.0, false, 0.5, 0.2);
     // A recording that is entirely silence collapses to just the kept pause,
-    // halved to 0.05 s by the 2x speed.
-    let expected = 0.1 * sr as f64 * 0.5;
+    // halved to 0.1 s by the 2x speed.
+    let expected = 0.2 * sr as f64 * 0.5;
     let got = out.len() as f64;
     assert!(
         (got - expected).abs() < 0.25 * expected,
@@ -172,8 +172,8 @@ fn skip_baked_map_agrees_with_the_render() {
     x.extend(vec![0.0f32; (1.5 * sr as f64) as usize]);
     x.extend(tone(140.0, 0.5, sr, 0.3));
 
-    let map = SkipBakedMap::new(&x, sr, 2.0, false, 0.5, 0.1);
-    let out_len = time_stretch_skip_silence(&x, sr, 2.0, false, 0.5, 0.1).len() as f64;
+    let map = SkipBakedMap::new(&x, sr, 2.0, false, 0.5, 0.2);
+    let out_len = time_stretch_skip_silence(&x, sr, 2.0, false, 0.5, 0.2).len() as f64;
 
     assert!(map.map_position(0.0).abs() < 1.0, "start should map to 0");
 
