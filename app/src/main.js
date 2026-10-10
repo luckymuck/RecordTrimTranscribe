@@ -89,8 +89,8 @@ let speedValue = 1.0;
 
 // Silence longer than this is skipped, both in playback and in a speed-baked
 // export. A short pause is left in its place so the next word stays easy to
-// pick up.
-const SKIP_MIN_S = 0.5;
+// pick up. That pause is source time at 1.00x; it shortens with the speed.
+const SKIP_MIN_S = 0.25;
 const SKIP_KEEP_S = 0.1;
 let skipSilence = false;
 let silenceZoneCache = null;

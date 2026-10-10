@@ -152,8 +152,9 @@ exports), click it to step up 0.25×, or double-click to reset to 1.0×. Play/st
 use icon-only buttons; Space is still play/stop.
 
 **Skip silence.** The `skip silence` toggle next to the speed readout skips any
-silence longer than 0.5 s, leaving a 0.1 s pause in its place so the next word
-stays easy to pick up. During playback the engine jumps the playhead past the
+silence longer than 0.25 s, leaving a 0.1 s pause in its place so the next word
+stays easy to pick up. That pause is measured at 1.00x, so it shortens with the
+speed (0.05 s at 2.00x). During playback the engine jumps the playhead past the
 gap (via `StreamStretcher.skip_to`); in a speed-baked export the gaps are cut
 down and rendered out, and a `SkipBakedMap` keeps clip boundaries aligned with
 what was actually written. Pauses shorter than the threshold are kept as-is.

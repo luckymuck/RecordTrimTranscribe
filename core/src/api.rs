@@ -37,7 +37,9 @@ fn class_rate(cls: Class, ratio: f64) -> f64 {
 /// than `min_silence_s`, each as `(start, end, rate)`.
 ///
 /// A long silence is not dropped outright: its last `keep_s` is retained as a
-/// natural-rate pause so the following word is easier to pick up.
+/// pause so the following word is easier to pick up. `keep_s` is measured in
+/// source time (the 1.00x timeline) and rendered at the target `ratio`, so the
+/// pause shortens with the speed like everything else around it.
 fn skip_keep_list(
     segments: &[crate::timing::Segment],
     sr: u32,
@@ -56,8 +58,8 @@ fn skip_keep_list(
                 if start >= seg.end {
                     return None;
                 }
-                // Keep the pause at natural speed; stretching a pause helps nobody.
-                return Some((start, seg.end, 1.0));
+                // Scale with speed, so 0.1 s at 1.00x becomes 0.05 s at 2.00x.
+                return Some((start, seg.end, ratio));
             }
             let rate = if class_aware {
                 class_rate(seg.cls, ratio)

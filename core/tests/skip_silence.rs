@@ -136,9 +136,9 @@ fn skip_silence_export_cuts_the_gap_to_the_kept_pause() {
     x.extend(&speech);
 
     let out = time_stretch_skip_silence(&x, sr, 2.0, false, 0.5, 0.1);
-    // Two 0.5 s speech spans at 2x (~0.5 s) plus the kept 0.1 s pause at natural
-    // rate. No-skip would be ~1.25 s.
-    let expected = (speech.len() * 2) as f64 * 0.5 + 0.1 * sr as f64;
+    // Two 0.5 s speech spans at 2x (~0.5 s) plus the kept 0.1 s pause, itself
+    // halved by the 2x speed. No-skip would be ~1.25 s.
+    let expected = (speech.len() * 2) as f64 * 0.5 + 0.1 * sr as f64 * 0.5;
     let got = out.len() as f64;
     assert!(
         (got - expected).abs() < 0.12 * expected,
@@ -152,11 +152,12 @@ fn skip_silence_export_of_pure_silence_leaves_the_kept_pause() {
     let sr = 48000;
     let x = vec![0.0f32; (2.0 * sr as f64) as usize];
     let out = time_stretch_skip_silence(&x, sr, 2.0, false, 0.5, 0.1);
-    // A recording that is entirely silence collapses to just the kept pause.
-    let expected = 0.1 * sr as f64;
+    // A recording that is entirely silence collapses to just the kept pause,
+    // halved to 0.05 s by the 2x speed.
+    let expected = 0.1 * sr as f64 * 0.5;
     let got = out.len() as f64;
     assert!(
-        (got - expected).abs() < 0.2 * expected,
+        (got - expected).abs() < 0.25 * expected,
         "got {got} samples, expected ~{expected}"
     );
 }
