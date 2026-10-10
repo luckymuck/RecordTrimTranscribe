@@ -21,6 +21,13 @@ use crate::timing::TimeMap;
 const TAIL_S: f64 = 0.10;
 /// Input consumed per emitted block (seconds).
 const SP_S: f64 = 0.40;
+/// Startup fade applied at the very first block of a fresh engine (seconds).
+/// Long enough to mask a click when playback begins in arbitrary audio.
+const STARTUP_FADE_S: f64 = 0.02;
+/// Startup fade applied after a `skip_to` (seconds). The jump deliberately lands
+/// inside a quiet region, so a long fade is pointless and would swallow the
+/// silence kept at the trailing edge of the gap. Just enough to avoid a step.
+const SKIP_FADE_S: f64 = 0.002;
 
 pub struct StreamStretcher {
     sr: u32,
@@ -35,6 +42,9 @@ pub struct StreamStretcher {
     /// block can crossfade across the seam instead of stepping.
     pending: Vec<f32>,
     started: bool,
+    /// Output samples to fade in at a cold start. Set to `STARTUP_FADE_S` for a
+    /// fresh engine and to `SKIP_FADE_S` after a `skip_to`.
+    resume_fade: usize,
     /// Set when the caller knows no more input will be pushed. This prevents a
     /// temporarily short input buffer from being mistaken for the end of audio.
     eof: bool,
@@ -51,6 +61,7 @@ impl StreamStretcher {
             ready: VecDeque::new(),
             pending: Vec::new(),
             started: false,
+            resume_fade: (STARTUP_FADE_S * sample_rate as f64) as usize,
             eof: false,
         };
         s.set_speed(speed);
@@ -91,6 +102,7 @@ impl StreamStretcher {
         self.ready.clear();
         self.pending.clear();
         self.started = false;
+        self.resume_fade = (STARTUP_FADE_S * self.sr as f64) as usize;
         self.eof = false;
     }
 
@@ -103,10 +115,11 @@ impl StreamStretcher {
     /// Jump the input cursor forward to `input_pos`, discarding buffered input and
     /// any overlap-add carry.
     ///
-    /// Used to skip a region (a long silence) during playback. The output is
-    /// discontinuous across the jump, which is inaudible because callers only skip
-    /// regions whose amplitude is at the floor. The target is clamped to be
-    /// monotonic so a stale or out-of-order call can never rewind the engine.
+    /// Used to skip a region (a long silence) during playback. The target is
+    /// clamped to be monotonic so a stale or out-of-order call can never rewind
+    /// the engine. The resume uses a very short fade rather than the full startup
+    /// fade: the jump lands inside silence, and a long fade would attenuate the
+    /// quiet speech kept at the trailing edge of the gap.
     pub fn skip_to(&mut self, input_pos: f64) {
         let target = input_pos.max(self.xc);
         self.input.clear();
@@ -115,6 +128,7 @@ impl StreamStretcher {
         self.ready.clear();
         self.pending.clear();
         self.started = false;
+        self.resume_fade = (SKIP_FADE_S * self.sr as f64) as usize;
         self.eof = false;
     }
 
@@ -185,15 +199,19 @@ impl StreamStretcher {
         }
 
         let emit_len = (j_end - j0) as usize;
+        // `fade` is the inter-block crossfade length. `startup` is the cold-start
+        // fade-in length, which is short after a `skip_to` so the recovered audio
+        // is not swallowed.
         let fade = ((0.02 * sr) as usize).min(emit_len / 2).max(1);
+        let startup = self.resume_fade.min(emit_len);
         let flush = self.eof && in_len < target_end;
 
         if self.rendered_is_passthrough(ratio) {
             // 1.0x: raw pass-through. Blocks are contiguous copies of the source,
             // so the only edge that can pop is the very start of playback.
             for (idx, j) in (j0..j_end).enumerate() {
-                let w = if !self.started && idx < fade {
-                    (idx + 1) as f32 / (fade + 1) as f32
+                let w = if !self.started && idx < startup {
+                    (idx + 1) as f32 / (startup + 1) as f32
                 } else {
                     1.0
                 };
@@ -210,11 +228,11 @@ impl StreamStretcher {
         if emit_len >= 2 * fade {
             if self.pending.is_empty() {
                 // First stretched block: emit everything except the tail, which is
-                // held back for the next block, with a startup fade-in.
+                // held back for the next block, with a cold-start fade-in.
                 let stop = (j_end - fade as i64).max(j0);
                 for (idx, j) in (j0..stop).enumerate() {
-                    let w = if idx < fade {
-                        (idx + 1) as f32 / (fade + 1) as f32
+                    let w = if idx < startup {
+                        (idx + 1) as f32 / (startup + 1) as f32
                     } else {
                         1.0
                     };

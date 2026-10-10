@@ -79,8 +79,11 @@ fn skip_to_matches_a_fresh_render_from_the_target() {
     assert!(!after.is_empty(), "nothing rendered after the skip");
     let n = after.len().min(reference.len());
     assert!(n > sr as usize / 4, "too little to compare");
+    // Skip the cold-start region: the reference uses the full 20 ms startup fade
+    // while a skip resumes on a 2 ms one. Past that both are the same render.
+    let lo = (0.03 * sr as f64) as usize;
     let mut worst = 0.0f32;
-    for i in 0..n {
+    for i in lo..n {
         worst = worst.max((after[i] - reference[i]).abs());
     }
     assert!(worst < 1e-4, "post-skip audio diverged: worst {worst}");
@@ -107,6 +110,31 @@ fn skip_to_is_monotonic() {
     // 4000 would instead yield ~6000.
     let len = out.len() as i64;
     assert!((len - 4000).abs() < 300, "got {len}, skip was not clamped");
+}
+
+/// A jump must not fade the resumed audio in over the long startup ramp: the
+/// kept tail of a silence gap is short at speed, and a 20 ms fade would swallow
+/// most of it (the quiet speech at the edge of a pause).
+#[test]
+fn skip_to_resumes_without_a_long_fade() {
+    let sr = 48000;
+    let x = vec![0.5f32; sr as usize * 2];
+    // 1.0x is passthrough, so the output level is exactly the fade envelope.
+    let mut s = StreamStretcher::new(sr, 1.0);
+    s.push(&x[..sr as usize]);
+    let _ = s.pull(1 << 20);
+    s.skip_to(sr as f64);
+    s.push(&x[sr as usize..]);
+    let mut out = Vec::new();
+    drain(&mut s, &mut out);
+
+    let probe = (0.005 * sr as f64) as usize; // 5 ms after the resume
+    assert!(out.len() > probe + 10, "too little output to probe");
+    let level = out[probe].abs();
+    assert!(
+        level > 0.49,
+        "level at 5 ms after the jump was {level}; the long startup fade is back"
+    );
 }
 
 #[test]

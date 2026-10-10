@@ -171,16 +171,24 @@ export class Player {
       buf.copyToChannel(chunk, 0);
       const node = this.ctx.createBufferSource();
       node.buffer = buf;
-      node.connect(this.gain);
+      // Each chunk gets its own gain so it can be ramped out when dropped
+      // mid-play (a skip-silence jump), instead of being cut off flat.
+      const g = this.ctx.createGain();
+      node.connect(g);
+      g.connect(this.gain);
+      const entry = { node, gain: g };
       node.onended = () => {
         try {
           node.disconnect();
         } catch (e) {}
-        const index = this.sources.indexOf(node);
+        try {
+          g.disconnect();
+        } catch (e) {}
+        const index = this.sources.indexOf(entry);
         if (index >= 0) this.sources.splice(index, 1);
       };
       node.start(this.scheduleTime);
-      this.sources.push(node);
+      this.sources.push(entry);
       this.scheduleTime += chunk.length / this.sr;
     }
     this.onPosition(this._position(this.ctx.currentTime));
@@ -217,22 +225,15 @@ export class Player {
 
   /**
    * Jump the playhead to `sample`, dropping the scheduled audio and the engine's
-   * input cursor. The cut lands inside a silence zone, so it is inaudible.
+   * input cursor. The outgoing audio is ramped out over the resume lead so the
+   * cut is not a flat truncation, and the resumed audio begins as the ramp ends.
    *
    * `scheduleTime` is zeroed rather than set here: the caller picks the resume
    * lead (a jump wants a very short one) and anchors `timeStart` to it, so the
    * two must be decided together.
    */
   _skipTo(sample) {
-    for (const n of this.sources) {
-      try {
-        n.stop();
-      } catch (e) {}
-      try {
-        n.disconnect();
-      } catch (e) {}
-    }
-    this.sources = [];
+    this._dropSources(RESUME_LEAD);
     if (this.stretcher) this.stretcher.skip_to(sample);
     this.srcCursor = sample;
     this.srcStart = sample;
@@ -260,16 +261,32 @@ export class Player {
       clearInterval(this.timer);
       this.timer = null;
     }
-    for (const n of this.sources) {
+    this._dropSources(0);
+    this.stretcher = null;
+  }
+
+  /**
+   * Drop every scheduled chunk. `fade` seconds ramps each one out first, which
+   * is what keeps a mid-playback skip from truncating the outgoing audio flat.
+   */
+  _dropSources(fade) {
+    const now = this.ctx.currentTime;
+    for (const s of this.sources) {
       try {
-        n.stop();
-      } catch (e) {}
-      try {
-        n.disconnect();
+        if (fade > 0) {
+          const level = s.gain.gain.value;
+          s.gain.gain.cancelScheduledValues(now);
+          s.gain.gain.setValueAtTime(level, now);
+          s.gain.gain.linearRampToValueAtTime(0, now + fade);
+          s.node.stop(now + fade);
+        } else {
+          s.node.stop();
+          s.node.disconnect();
+          s.gain.disconnect();
+        }
       } catch (e) {}
     }
     this.sources = [];
-    this.stretcher = null;
   }
 
   /** Offline render of the whole clip at `speed` (faithful hybrid engine). */
