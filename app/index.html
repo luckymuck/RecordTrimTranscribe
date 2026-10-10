@@ -66,7 +66,8 @@
       <span class="sep"></span>
       <span id="speed" class="speed-dial" tabindex="0" role="slider" aria-label="Playback speed" aria-valuemin="1" aria-valuemax="4" aria-valuenow="1.00"
         title="Drag left / right to change speed · click to add 0.25× · double-click to reset">1.00×</span>
-      <label class="chk" title="Skip silence longer than 0.5 s — during playback and in speed-baked exports"><input type="checkbox" id="skipSilence"> skip silence</label>
+      <button id="skipSilence" class="btn sm toggle" type="button" aria-pressed="false"
+        title="Skip silence longer than 0.5 s — during playback and in speed-baked exports">skip silence</button>
       <span class="sep"></span>
       <button class="btn sm" id="zoomIn">＋</button>
       <button class="btn sm" id="zoomOut">－</button>
@@ -96,7 +97,7 @@
       <label class="chk" title="Render exports through the DSP at the current playback speed"><input type="checkbox" id="speedBaked"> speed-baked</label>
       <label class="chk" title="Protect consonant-like material when baking audio at speed"><input type="checkbox" id="classAware"> class-aware</label>
       <button class="btn" id="exportAll">Export whole file</button>
-      <button class="btn primary" id="exportClips">Export clips (from splits)</button>
+      <button class="btn" id="exportClips">Export clips (from splits)</button>
       <span class="muted" id="exportStatus"></span>
     </div>
     <div id="clipList" class="cliplist"></div>

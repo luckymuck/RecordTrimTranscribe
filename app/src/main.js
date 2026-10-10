@@ -88,8 +88,10 @@ const SPEED_MAX = 4.0;
 let speedValue = 1.0;
 
 // Silence longer than this is skipped, both in playback and in a speed-baked
-// export. Short pauses are kept so speech rhythm survives.
+// export. A short pause is left in its place so the next word stays easy to
+// pick up.
 const SKIP_MIN_S = 0.5;
+const SKIP_KEEP_S = 0.1;
 let skipSilence = false;
 let silenceZoneCache = null;
 
@@ -108,7 +110,7 @@ function setSpeedUI(s) {
 function getSilenceZones() {
   if (!state.pcm) return [];
   if (!silenceZoneCache) {
-    silenceZoneCache = silenceZones(state.pcm, state.sampleRate, SKIP_MIN_S);
+    silenceZoneCache = silenceZones(state.pcm, state.sampleRate, SKIP_MIN_S, SKIP_KEEP_S);
   }
   return silenceZoneCache;
 }
@@ -121,7 +123,7 @@ function applySkipSilence() {
 function setSkipSilence(on) {
   skipSilence = on;
   const box = $("skipSilence");
-  if (box) box.checked = on;
+  if (box) box.setAttribute("aria-pressed", on ? "true" : "false");
   if (on && state.pcm) {
     $("saveStatus").textContent = "Finding silence…";
     // Let the status paint before the (synchronous) energy scan runs.
@@ -134,7 +136,7 @@ function setSkipSilence(on) {
           : `No silence longer than ${SKIP_MIN_S}s found`;
       } catch (err) {
         skipSilence = false;
-        if (box) box.checked = false;
+        if (box) box.setAttribute("aria-pressed", "false");
         applySkipSilence();
         $("saveStatus").textContent = `Skip silence failed: ${err.message}`;
       }
@@ -852,7 +854,8 @@ function makeExportMap() {
       state.sampleRate,
       speedValue,
       $("classAware").checked,
-      SKIP_MIN_S
+      SKIP_MIN_S,
+      SKIP_KEEP_S
     );
   }
   if (useBakedExport()) {
@@ -871,7 +874,8 @@ function exportSource() {
         state.sampleRate,
         speedValue,
         $("classAware").checked,
-        SKIP_MIN_S
+        SKIP_MIN_S,
+        SKIP_KEEP_S
       ),
       sampleRate: state.sampleRate,
     };
@@ -909,7 +913,7 @@ function mapClipForExport(clip) {
 // Keep displayed clip lengths in output time when baked-export inputs change.
 $("speedBaked").addEventListener("change", refreshClipDurations);
 $("classAware").addEventListener("change", refreshClipDurations);
-$("skipSilence").addEventListener("change", () => setSkipSilence($("skipSilence").checked));
+$("skipSilence").addEventListener("click", () => setSkipSilence(!skipSilence));
 
 $("exportAll").addEventListener("click", () => {
   if (!state.pcm) return;

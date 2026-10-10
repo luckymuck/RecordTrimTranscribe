@@ -77,11 +77,12 @@ export class SkipBakedMap {
      * @param {number} speed
      * @param {boolean} class_aware
      * @param {number} min_silence_s
+     * @param {number} keep_s
      */
-    constructor(samples, sample_rate, speed, class_aware, min_silence_s) {
+    constructor(samples, sample_rate, speed, class_aware, min_silence_s, keep_s) {
         const ptr0 = passArrayF32ToWasm0(samples, wasm.__wbindgen_malloc);
         const len0 = WASM_VECTOR_LEN;
-        const ret = wasm.skipbakedmap_new(ptr0, len0, sample_rate, speed, class_aware, min_silence_s);
+        const ret = wasm.skipbakedmap_new(ptr0, len0, sample_rate, speed, class_aware, min_silence_s, keep_s);
         this.__wbg_ptr = ret;
         SkipBakedMapFinalization.register(this, this.__wbg_ptr, this);
         return this;
@@ -195,19 +196,20 @@ export function analyze(samples, sample_rate) {
 
 /**
  * Silence runs longer than `min_silence_s`, as flat `[start, end, ...]` sample
- * positions.
+ * positions. Each zone is trimmed by `keep_s` at its end.
  *
  * Runs on the `f32` samples directly so enabling skip-silence on a long
  * recording never materialises a full-length `f64` copy.
  * @param {Float32Array} samples
  * @param {number} sample_rate
  * @param {number} min_silence_s
+ * @param {number} keep_s
  * @returns {Float64Array}
  */
-export function silence_zones(samples, sample_rate, min_silence_s) {
+export function silence_zones(samples, sample_rate, min_silence_s, keep_s) {
     const ptr0 = passArrayF32ToWasm0(samples, wasm.__wbindgen_malloc);
     const len0 = WASM_VECTOR_LEN;
-    const ret = wasm.silence_zones(ptr0, len0, sample_rate, min_silence_s);
+    const ret = wasm.silence_zones(ptr0, len0, sample_rate, min_silence_s, keep_s);
     var v2 = getArrayF64FromWasm0(ret[0], ret[1]).slice();
     wasm.__wbindgen_free(ret[0], ret[1] * 8, 8);
     return v2;
@@ -235,23 +237,23 @@ export function time_stretch(samples, sample_rate, speed, class_aware) {
 }
 
 /**
- * Offline render with silence longer than `min_silence_s` removed, then the rest
- * stretched to `speed`.
+ * Offline render with silence longer than `min_silence_s` cut down to a `keep_s`
+ * pause, then the rest stretched to `speed`.
  *
  * Each kept segment is rendered on its own and concatenated. The joins land at
  * energy minima (that is what "silence" means), so they need no crossfade.
- * Returns empty only when the whole recording is silence.
  * @param {Float32Array} samples
  * @param {number} sample_rate
  * @param {number} speed
  * @param {boolean} class_aware
  * @param {number} min_silence_s
+ * @param {number} keep_s
  * @returns {Float32Array}
  */
-export function time_stretch_skip_silence(samples, sample_rate, speed, class_aware, min_silence_s) {
+export function time_stretch_skip_silence(samples, sample_rate, speed, class_aware, min_silence_s, keep_s) {
     const ptr0 = passArrayF32ToWasm0(samples, wasm.__wbindgen_malloc);
     const len0 = WASM_VECTOR_LEN;
-    const ret = wasm.time_stretch_skip_silence(ptr0, len0, sample_rate, speed, class_aware, min_silence_s);
+    const ret = wasm.time_stretch_skip_silence(ptr0, len0, sample_rate, speed, class_aware, min_silence_s, keep_s);
     var v2 = getArrayF32FromWasm0(ret[0], ret[1]).slice();
     wasm.__wbindgen_free(ret[0], ret[1] * 4, 4);
     return v2;

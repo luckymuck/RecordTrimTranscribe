@@ -52,18 +52,18 @@ const gap = sr * 1.5;
 const z = new Float32Array(n * 2 + gap);
 z.set(x, 0);
 z.set(x, n + gap);
-const zones = dsp.silence_zones(z, sr, 0.5);
+const zones = dsp.silence_zones(z, sr, 0.5, 0.1);
 check("silence_zones finds the gap", zones.length === 2, `(${zones.length})`);
 
-const zs = dsp.time_stretch_skip_silence(z, sr, 2.0, false, 0.5);
+const zs = dsp.time_stretch_skip_silence(z, sr, 2.0, false, 0.5, 0.1);
 check(
-  "skip-silence render drops the gap",
+  "skip-silence render cuts the gap",
   zs.length > 0 && zs.length < z.length / 2,
   `(${zs.length} vs ${z.length})`
 );
 check("skip-silence render finite", zs.every((v) => Number.isFinite(v)));
 
-const map = new dsp.SkipBakedMap(z, sr, 2.0, false, 0.5);
+const map = new dsp.SkipBakedMap(z, sr, 2.0, false, 0.5, 0.1);
 const mapped = map.map_position(z.length);
 check(
   "SkipBakedMap end matches render length",

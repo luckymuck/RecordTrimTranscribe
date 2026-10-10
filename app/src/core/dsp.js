@@ -38,25 +38,27 @@ export function timeStretch(pcm, sampleRate, speed, classAware) {
 }
 
 /**
- * Offline render with silence longer than `minSilenceS` removed, then the rest
- * stretched to `speed`.
+ * Offline render with silence longer than `minSilenceS` cut down to a
+ * `keepSilenceS` pause, then the rest stretched to `speed`.
  * @param {Float32Array} pcm
  * @param {number} sampleRate
  * @param {number} speed
  * @param {boolean} classAware
  * @param {number} minSilenceS
+ * @param {number} keepSilenceS
  * @returns {Float32Array}
  */
-export function timeStretchSkipSilence(pcm, sampleRate, speed, classAware, minSilenceS) {
-  return time_stretch_skip_silence(pcm, sampleRate, speed, classAware, minSilenceS);
+export function timeStretchSkipSilence(pcm, sampleRate, speed, classAware, minSilenceS, keepSilenceS) {
+  return time_stretch_skip_silence(pcm, sampleRate, speed, classAware, minSilenceS, keepSilenceS);
 }
 
 /**
- * Silence runs longer than `minSilenceS`, as `{start, end}` in samples.
+ * Silence runs longer than `minSilenceS`, as `{start, end}` in samples, each
+ * trimmed by `keepSilenceS` at its end.
  * @returns {{start: number, end: number}[]}
  */
-export function silenceZones(pcm, sampleRate, minSilenceS) {
-  const flat = silence_zones(pcm, sampleRate, minSilenceS);
+export function silenceZones(pcm, sampleRate, minSilenceS, keepSilenceS) {
+  const flat = silence_zones(pcm, sampleRate, minSilenceS, keepSilenceS);
   const zones = [];
   for (let i = 0; i + 1 < flat.length; i += 2) {
     zones.push({ start: flat[i], end: flat[i + 1] });
@@ -84,8 +86,8 @@ export function makeBakedMap(pcm, sampleRate, speed, classAware) {
  * Position map for a skip-silence render. Matches `timeStretchSkipSilence`.
  * The caller must call `dispose()` when finished.
  */
-export function makeSkipBakedMap(pcm, sampleRate, speed, classAware, minSilenceS) {
-  const map = SkipBakedMap.new(pcm, sampleRate, speed, classAware, minSilenceS);
+export function makeSkipBakedMap(pcm, sampleRate, speed, classAware, minSilenceS, keepSilenceS) {
+  const map = SkipBakedMap.new(pcm, sampleRate, speed, classAware, minSilenceS, keepSilenceS);
   return {
     mapSample: (sample) => Math.round(map.map_position(sample)),
     dispose: () => map.free(),

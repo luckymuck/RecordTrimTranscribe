@@ -116,17 +116,18 @@ fn silence_zones_finds_only_long_gaps() {
     x.extend(vec![0.0f32; (1.5 * sr as f64) as usize]); // 1.5 s > 0.5 s
     x.extend(tone(140.0, 0.5, sr, 0.3));
 
-    let zones = silence_zones(&x, sr, 0.5);
+    let zones = silence_zones(&x, sr, 0.5, 0.1);
     assert_eq!(zones.len(), 2, "expected exactly one zone, got {zones:?}");
     assert!((zones[0] - 24000.0).abs() < 2000.0, "zone start {}", zones[0]);
-    assert!((zones[1] - 96000.0).abs() < 2000.0, "zone end {}", zones[1]);
+    // The zone is trimmed by the kept 0.1 s, so it stops short of the speech.
+    assert!((zones[1] - 91200.0).abs() < 2000.0, "zone end {}", zones[1]);
 
     // A threshold above the gap length yields nothing.
-    assert!(silence_zones(&x, sr, 2.0).is_empty());
+    assert!(silence_zones(&x, sr, 2.0, 0.1).is_empty());
 }
 
 #[test]
-fn skip_silence_export_drops_the_long_gap() {
+fn skip_silence_export_cuts_the_gap_to_the_kept_pause() {
     let sr = 48000;
     let speech = tone(140.0, 0.5, sr, 0.3);
     let mut x = Vec::new();
@@ -134,23 +135,30 @@ fn skip_silence_export_drops_the_long_gap() {
     x.extend(vec![0.0f32; (1.5 * sr as f64) as usize]); // 1.5 s > 0.5 s
     x.extend(&speech);
 
-    let out = time_stretch_skip_silence(&x, sr, 2.0, false, 0.5);
-    // Two 0.5 s speech spans at 2x -> ~0.5 s total; no-skip would be ~1.25 s.
-    let expected = (speech.len() * 2) as f64 * 0.5;
+    let out = time_stretch_skip_silence(&x, sr, 2.0, false, 0.5, 0.1);
+    // Two 0.5 s speech spans at 2x (~0.5 s) plus the kept 0.1 s pause at natural
+    // rate. No-skip would be ~1.25 s.
+    let expected = (speech.len() * 2) as f64 * 0.5 + 0.1 * sr as f64;
     let got = out.len() as f64;
     assert!(
-        (got - expected).abs() < 0.15 * expected,
+        (got - expected).abs() < 0.12 * expected,
         "got {got} samples, expected ~{expected}"
     );
     assert!(out.iter().all(|v| v.is_finite()));
 }
 
 #[test]
-fn skip_silence_export_of_pure_silence_is_empty() {
+fn skip_silence_export_of_pure_silence_leaves_the_kept_pause() {
     let sr = 48000;
     let x = vec![0.0f32; (2.0 * sr as f64) as usize];
-    let out = time_stretch_skip_silence(&x, sr, 2.0, false, 0.5);
-    assert!(out.is_empty(), "expected empty output, got {}", out.len());
+    let out = time_stretch_skip_silence(&x, sr, 2.0, false, 0.5, 0.1);
+    // A recording that is entirely silence collapses to just the kept pause.
+    let expected = 0.1 * sr as f64;
+    let got = out.len() as f64;
+    assert!(
+        (got - expected).abs() < 0.2 * expected,
+        "got {got} samples, expected ~{expected}"
+    );
 }
 
 /// The map must agree with the rendered audio: a position inside a skipped gap
@@ -163,8 +171,8 @@ fn skip_baked_map_agrees_with_the_render() {
     x.extend(vec![0.0f32; (1.5 * sr as f64) as usize]);
     x.extend(tone(140.0, 0.5, sr, 0.3));
 
-    let map = SkipBakedMap::new(&x, sr, 2.0, false, 0.5);
-    let out_len = time_stretch_skip_silence(&x, sr, 2.0, false, 0.5).len() as f64;
+    let map = SkipBakedMap::new(&x, sr, 2.0, false, 0.5, 0.1);
+    let out_len = time_stretch_skip_silence(&x, sr, 2.0, false, 0.5, 0.1).len() as f64;
 
     assert!(map.map_position(0.0).abs() < 1.0, "start should map to 0");
 
@@ -173,7 +181,8 @@ fn skip_baked_map_agrees_with_the_render() {
     // probes to each other tightly and to the nominal boundary loosely.
     let boundary = speech_len as f64 * 0.5;
     let resolution = 0.035 * sr as f64;
-    let probes = [speech_len + 4800, speech_len + 24000, x.len() - (speech_len + 4800)];
+    // All three probes sit inside the skipped part (well before the kept pause).
+    let probes = [speech_len + 4800, speech_len + 24000, 60000];
     let mapped: Vec<f64> = probes.iter().map(|p| map.map_position(*p as f64)).collect();
     for (i, &got) in mapped.iter().enumerate() {
         assert!(

@@ -66,6 +66,11 @@ main { max-width: 960px; margin: 0 auto; padding: 0.8rem 1rem 1.4rem; display: f
 .btn.sm { padding: 0.28rem 0.5rem; font-size: 0.78rem; }
 .btn.primary { background: var(--accent); color: #06221d; border-color: var(--accent); font-weight: 600; }
 .btn.primary:hover { color: #06221d; filter: brightness(1.08); }
+.btn.toggle[aria-pressed="true"] {
+  background: var(--accent); color: #06221d; border-color: var(--accent);
+  border-style: solid; font-weight: 600;
+}
+.btn.toggle[aria-pressed="true"]:hover { color: #06221d; filter: brightness(1.08); }
 .btn.rec { color: var(--rec); border-color: var(--rec); }
 .btn.rec.recording { background: var(--rec); color: #fff; }
 .btn.rec.paused { background: var(--split); border-color: var(--split); color: #1a1205; }

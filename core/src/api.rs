@@ -35,19 +35,29 @@ fn class_rate(cls: Class, ratio: f64) -> f64 {
 
 /// Keep-list for a skip-silence render: every segment except silence runs longer
 /// than `min_silence_s`, each as `(start, end, rate)`.
+///
+/// A long silence is not dropped outright: its last `keep_s` is retained as a
+/// natural-rate pause so the following word is easier to pick up.
 fn skip_keep_list(
     segments: &[crate::timing::Segment],
     sr: u32,
     ratio: f64,
     class_aware: bool,
     min_silence_s: f64,
+    keep_s: f64,
 ) -> Vec<(i64, i64, f64)> {
+    let keep = (keep_s * sr as f64).round() as i64;
     segments
         .iter()
         .filter_map(|seg| {
             let seconds = (seg.end - seg.start) as f64 / sr as f64;
             if seg.cls == Class::Silence && seconds > min_silence_s {
-                return None;
+                let start = (seg.end - keep).max(seg.start);
+                if start >= seg.end {
+                    return None;
+                }
+                // Keep the pause at natural speed; stretching a pause helps nobody.
+                return Some((start, seg.end, 1.0));
             }
             let rate = if class_aware {
                 class_rate(seg.cls, ratio)
@@ -130,21 +140,25 @@ pub fn analyze(samples: &[f32], sample_rate: u32) -> String {
 }
 
 /// Silence runs longer than `min_silence_s`, as flat `[start, end, ...]` sample
-/// positions.
+/// positions. Each zone is trimmed by `keep_s` at its end.
 ///
 /// Runs on the `f32` samples directly so enabling skip-silence on a long
 /// recording never materialises a full-length `f64` copy.
 #[wasm_bindgen]
-pub fn silence_zones(samples: &[f32], sample_rate: u32, min_silence_s: f64) -> Vec<f64> {
-    rate::silence_zones_f32(samples, sample_rate, min_silence_s)
+pub fn silence_zones(
+    samples: &[f32],
+    sample_rate: u32,
+    min_silence_s: f64,
+    keep_s: f64,
+) -> Vec<f64> {
+    rate::silence_zones_f32(samples, sample_rate, min_silence_s, keep_s)
 }
 
-/// Offline render with silence longer than `min_silence_s` removed, then the rest
-/// stretched to `speed`.
+/// Offline render with silence longer than `min_silence_s` cut down to a `keep_s`
+/// pause, then the rest stretched to `speed`.
 ///
 /// Each kept segment is rendered on its own and concatenated. The joins land at
 /// energy minima (that is what "silence" means), so they need no crossfade.
-/// Returns empty only when the whole recording is silence.
 #[wasm_bindgen]
 pub fn time_stretch_skip_silence(
     samples: &[f32],
@@ -152,6 +166,7 @@ pub fn time_stretch_skip_silence(
     speed: f64,
     class_aware: bool,
     min_silence_s: f64,
+    keep_s: f64,
 ) -> Vec<f32> {
     let x = to_f64(samples);
     if x.len() < 2 {
@@ -159,7 +174,7 @@ pub fn time_stretch_skip_silence(
     }
     let ratio = ratio_for_speed(speed);
     let segments = rate::align_by_energy(&x, sample_rate);
-    let keep = skip_keep_list(&segments, sample_rate, ratio, class_aware, min_silence_s);
+    let keep = skip_keep_list(&segments, sample_rate, ratio, class_aware, min_silence_s, keep_s);
 
     let mut out: Vec<f32> = Vec::new();
     for (start, end, rate) in keep {
@@ -226,11 +241,12 @@ impl SkipBakedMap {
         speed: f64,
         class_aware: bool,
         min_silence_s: f64,
+        keep_s: f64,
     ) -> SkipBakedMap {
         let x = to_f64(samples);
         let ratio = ratio_for_speed(speed);
         let segments = rate::align_by_energy(&x, sample_rate);
-        let keep = skip_keep_list(&segments, sample_rate, ratio, class_aware, min_silence_s);
+        let keep = skip_keep_list(&segments, sample_rate, ratio, class_aware, min_silence_s, keep_s);
 
         let mut kept = Vec::with_capacity(keep.len());
         let mut out_pos = 0.0f64;

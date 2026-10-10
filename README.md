@@ -151,11 +151,12 @@ the left/right to change it (with the optional class-aware allocation for baked
 exports), click it to step up 0.25×, or double-click to reset to 1.0×. Play/stop
 use icon-only buttons; Space is still play/stop.
 
-**Skip silence.** The `skip silence` checkbox next to the speed readout skips any
-silence longer than 0.5 s. During playback the engine jumps the playhead past the
-gap (via `StreamStretcher.skip_to`); in a speed-baked export the gaps are removed
-from the rendered audio, and a `SkipBakedMap` keeps clip boundaries aligned with
-what was actually written. Short pauses are kept, so speech rhythm survives.
+**Skip silence.** The `skip silence` toggle next to the speed readout skips any
+silence longer than 0.5 s, leaving a 0.1 s pause in its place so the next word
+stays easy to pick up. During playback the engine jumps the playhead past the
+gap (via `StreamStretcher.skip_to`); in a speed-baked export the gaps are cut
+down and rendered out, and a `SkipBakedMap` keeps clip boundaries aligned with
+what was actually written. Pauses shorter than the threshold are kept as-is.
 
 ### Known limitations
 
