@@ -1,0 +1,17 @@
+{
+  "name": "fasttalk-core",
+  "type": "module",
+  "description": "Browser/WASM port of FastTalk time-scale modification for speech",
+  "version": "0.1.0",
+  "license": "MIT",
+  "files": [
+    "fasttalk_core_bg.wasm",
+    "fasttalk_core.js",
+    "fasttalk_core.d.ts"
+  ],
+  "main": "fasttalk_core.js",
+  "types": "fasttalk_core.d.ts",
+  "sideEffects": [
+    "./snippets/*"
+  ]
+}

@@ -1,0 +1,9 @@
+# Rust / WASM build artifacts
+core/target/
+core/pkg/
+core/pkg-node/
+src-tauri/target/
+src-tauri/gen/
+
+# Node
+node_modules/

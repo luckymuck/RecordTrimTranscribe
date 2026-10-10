@@ -1,0 +1,22 @@
+/* tslint:disable */
+/* eslint-disable */
+export const memory: WebAssembly.Memory;
+export const __wbg_bakedmap_free: (a: number, b: number) => void;
+export const __wbg_streamstretcher_free: (a: number, b: number) => void;
+export const analyze: (a: number, b: number, c: number) => [number, number];
+export const bakedmap_map_position: (a: number, b: number) => number;
+export const bakedmap_new: (a: number, b: number, c: number, d: number, e: number) => number;
+export const streamstretcher_available_output: (a: number) => number;
+export const streamstretcher_finish: (a: number) => void;
+export const streamstretcher_new: (a: number, b: number) => number;
+export const streamstretcher_pull: (a: number, b: number) => [number, number];
+export const streamstretcher_push: (a: number, b: number, c: number) => void;
+export const streamstretcher_reset: (a: number) => void;
+export const streamstretcher_set_speed: (a: number, b: number) => void;
+export const streamstretcher_speed: (a: number) => number;
+export const time_stretch: (a: number, b: number, c: number, d: number, e: number) => [number, number];
+export const version: () => [number, number];
+export const __wbindgen_externrefs: WebAssembly.Table;
+export const __wbindgen_malloc: (a: number, b: number) => number;
+export const __wbindgen_free: (a: number, b: number, c: number) => void;
+export const __wbindgen_start: () => void;

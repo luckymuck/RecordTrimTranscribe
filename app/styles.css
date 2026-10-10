@@ -1,0 +1,162 @@
+:root {
+  --bg: #10131a;
+  --card: #171b26;
+  --card2: #1d2231;
+  --line: #2b3244;
+  --ink: #e7ecf5;
+  --muted: #8b96ac;
+  --accent: #5eead4;
+  --accent2: #7c9cff;
+  --rec: #ff5c6c;
+  --wave: #5eead4;
+  --wave2: #7c9cff;
+  --split: #ffb454;
+  --play: #ff7ab6;
+}
+
+* { box-sizing: border-box; }
+html, body { margin: 0; padding: 0; }
+body {
+  background: radial-gradient(1200px 600px at 15% -10%, #1a2333 0%, transparent 60%), var(--bg);
+  color: var(--ink);
+  font: 13.5px/1.45 system-ui, "Segoe UI", Roboto, sans-serif;
+  min-height: 100vh;
+}
+
+header {
+  display: flex; align-items: center; gap: 0.65rem;
+  padding: 0.55rem 1rem;
+  border-bottom: 1px solid var(--line);
+  flex-wrap: wrap;
+}
+.logo { font-size: 1.35rem; color: var(--accent); }
+header h1 { font-size: 1.05rem; margin: 0; letter-spacing: -0.01em; }
+header .sub { margin: 0; color: var(--muted); font-size: 0.7rem; }
+.dsp-status { margin-left: auto; font-size: 0.72rem; color: var(--muted); }
+
+main { max-width: 960px; margin: 0 auto; padding: 0.8rem 1rem 1.4rem; display: flex; flex-direction: column; gap: 0.8rem; }
+
+.card {
+  background: var(--card);
+  border: 1px solid var(--line);
+  border-radius: 10px;
+  padding: 0.65rem 0.8rem 0.8rem;
+}
+.card h2 { font-size: 0.92rem; margin: 0 0 0.55rem; display: flex; align-items: center; gap: 0.5rem; }
+.badge {
+  background: var(--accent2); color: #0b0e14; border-radius: 5px;
+  font-size: 0.72rem; padding: 0.15rem 0.45rem; font-weight: 700;
+}
+.card[aria-disabled="true"] { opacity: 0.5; pointer-events: none; filter: grayscale(0.3); }
+
+.row { display: flex; align-items: center; gap: 0.45rem; flex-wrap: wrap; margin-top: 0.45rem; }
+.wave-controls { flex-wrap: nowrap; overflow-x: auto; scrollbar-width: thin; padding-bottom: 2px; }
+.wave-controls .btn,
+.wave-controls .speed-dial { flex-shrink: 0; }
+.sep { width: 1px; height: 18px; background: var(--line); }
+.muted { color: var(--muted); font-size: 0.76rem; }
+
+.btn {
+  background: var(--card2); color: var(--ink); border: 1px solid var(--line);
+  border-radius: 7px; padding: 0.42rem 0.7rem; cursor: pointer; font: inherit;
+  transition: border-color .15s, color .15s, background .15s;
+}
+.btn:hover { border-color: var(--accent); color: var(--accent); }
+.btn:disabled { opacity: 0.4; cursor: not-allowed; }
+.btn.sm { padding: 0.28rem 0.5rem; font-size: 0.78rem; }
+.btn.primary { background: var(--accent); color: #06221d; border-color: var(--accent); font-weight: 600; }
+.btn.primary:hover { color: #06221d; filter: brightness(1.08); }
+.btn.rec { color: var(--rec); border-color: var(--rec); }
+.btn.rec.recording { background: var(--rec); color: #fff; }
+.btn.rec.paused { background: var(--split); border-color: var(--split); color: #1a1205; }
+.btn.file { position: relative; }
+.btn.file.is-disabled { opacity: 0.4; pointer-events: none; }
+
+.rec-time { font-variant-numeric: tabular-nums; color: var(--muted); }
+.meter { height: 3px; background: var(--line); border-radius: 2px; overflow: hidden; margin-top: 0.45rem; }
+.meter > div { height: 100%; width: 0%; background: linear-gradient(90deg, var(--accent), var(--accent2)); transition: width .08s; }
+
+.wave-shell { border: 1px solid var(--line); border-radius: 10px; overflow: hidden; background: #0c0f16; }
+#overview { display: block; width: 100%; cursor: pointer; background: #0a0d13; border-bottom: 1px solid var(--line); }
+.wave-main { position: relative; }
+#mainwave { display: block; width: 100%; cursor: crosshair; }
+#playhead {
+  position: absolute; top: 0; bottom: 0; width: 2px; background: var(--play);
+  display: none; box-shadow: 0 0 8px var(--play); pointer-events: none; z-index: 6;
+}
+#playhead::before {
+  content: ''; position: absolute; top: -9px; left: 50%; transform: translateX(-50%);
+  border: 5px solid transparent; border-top: 8px solid var(--play);
+}
+
+.chk { display: inline-flex; align-items: center; gap: 0.4rem; font-size: 0.78rem; color: var(--muted); }
+
+.icon-btn { font-size: 0.9rem; line-height: 1; min-width: 2.2rem; text-align: center; padding: 0.32rem 0.5rem; }
+.speed-dial {
+  font-family: ui-monospace, Consolas, monospace;
+  font-size: 0.82rem; font-variant-numeric: tabular-nums;
+  background: var(--card2); border: 1.5px dashed var(--line); border-radius: 7px;
+  padding: 0.28rem 0.55rem; cursor: ew-resize; user-select: none;
+  color: var(--accent); min-width: 3.8rem; text-align: center;
+}
+.speed-dial:hover { border-color: var(--accent); }
+.speed-dial.dragging { border-style: solid; border-color: var(--accent); background: rgba(94, 234, 212, 0.12); }
+.speed-dial:focus-visible { outline: 2px solid var(--accent2); outline-offset: 1px; }
+input[type=range] { accent-color: var(--accent); }
+select { background: var(--card2); color: var(--ink); border: 1px solid var(--line); border-radius: 6px; padding: 0.3rem 0.5rem; font: inherit; }
+.time { margin-left: auto; font-variant-numeric: tabular-nums; }
+
+.progress { height: 3px; background: var(--line); border-radius: 2px; overflow: hidden; margin-top: 0.45rem; }
+.progress > div { height: 100%; width: 0%; background: var(--accent); transition: width .2s; }
+
+.transcript { margin-top: 0.55rem; max-height: 440px; overflow: auto; border-top: 1px solid var(--line); padding-top: 0.45rem; }
+.seg { padding: 0.22rem 0.4rem; border-radius: 6px; cursor: pointer; display: flex; gap: 0.55rem; }
+.seg:hover { background: var(--card2); }
+.seg .t { color: var(--accent); font-variant-numeric: tabular-nums; flex-shrink: 0; font-size: 0.72rem; padding-top: 0.05rem; }
+.seg .x { color: var(--ink); }
+
+.cliplist { margin-top: 0.55rem; display: flex; flex-direction: column; gap: 0.3rem; }
+.clip { display: flex; align-items: center; gap: 0.5rem; background: var(--card2); border: 1px solid var(--line); border-radius: 6px; padding: 0.25rem 0.5rem; font-size: 0.8rem; }
+.clip .n { color: var(--split); width: 2.2rem; }
+.clip input { background: transparent; border: none; color: var(--ink); font: inherit; flex: 1; outline: none; }
+.clip .d { color: var(--muted); font-variant-numeric: tabular-nums; }
+.clip button { background: transparent; border: 1px solid var(--line); color: var(--muted); border-radius: 5px; cursor: pointer; padding: 0.15rem 0.45rem; }
+.clip button:hover { border-color: var(--accent); color: var(--accent); }
+.hint { color: var(--muted); font-size: 0.75rem; margin: 0.7rem 0 0; }
+
+/* Split labels drawn on top of the waveform, right of each split line */
+.split-label-layer { position: absolute; top: 0; left: 0; width: 100%; height: 0; pointer-events: none; z-index: 4; }
+.split-label {
+  position: absolute; top: 2px; white-space: nowrap;
+  max-width: 36vw; overflow: hidden; text-overflow: ellipsis;
+  font-size: 10px; font-family: ui-monospace, Consolas, "SF Mono", monospace;
+  padding: 1px 6px; border-radius: 4px;
+  background: rgba(10, 13, 23, 0.92); color: #ffb454; border: 1px solid rgba(255, 180, 84, 0.4);
+  line-height: 1.3;
+}
+.split-label .t { color: #ffd88a; }
+
+/* Right-click context menu for splits */
+.ctxmenu {
+  position: fixed; z-index: 1200; min-width: 190px;
+  background: var(--card); border: 1px solid var(--line); border-radius: 9px;
+  box-shadow: 0 10px 34px rgba(0, 0, 0, 0.55); padding: 4px;
+}
+.ctxmenu .ctx-title { font-size: 0.7rem; color: var(--muted); padding: 4px 10px 2px; }
+.ctxmenu button {
+  display: block; width: 100%; background: transparent; border: none;
+  text-align: left; color: var(--ink); padding: 6px 10px; border-radius: 6px;
+  cursor: pointer; font: inherit; font-size: 0.82rem;
+}
+.ctxmenu button:hover { background: var(--card2); }
+.ctxmenu button.danger { color: var(--rec); }
+.ctxmenu button.danger:hover { background: rgba(255, 92, 108, 0.12); }
+
+/* Recovery banner (floats on top) */
+.banner {
+  position: fixed; top: 12px; left: 50%; transform: translateX(-50%); z-index: 1300;
+  display: flex; align-items: center; gap: 0.8rem;
+  background: #241b10; border: 1px solid rgba(255, 180, 84, 0.55); color: var(--ink);
+  padding: 0.6rem 1rem; border-radius: 11px; font-size: 0.85rem;
+  box-shadow: 0 10px 36px rgba(0, 0, 0, 0.6); max-width: 94vw;
+}

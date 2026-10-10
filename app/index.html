@@ -1,0 +1,140 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Record · Trim · Transcribe</title>
+<link rel="stylesheet" href="styles.css">
+<script src="https://cdn.jsdelivr.net/npm/lamejs@1.2.1/lame.min.js"></script>
+<script type="importmap">
+{
+  "imports": {
+    "@huggingface/transformers": "https://cdn.jsdelivr.net/npm/@huggingface/transformers@3.5.1/+esm"
+  }
+}
+</script>
+</head>
+<body>
+<header>
+  <div class="logo">◉</div>
+  <div>
+    <h1>Record · Trim · Transcribe</h1>
+    <p class="sub">Local recording, fast intelligible playback, on-device transcription and editing</p>
+  </div>
+  <div class="dsp-status" id="dspStatus">DSP: loading…</div>
+</header>
+
+<main>
+  <!-- 1. Source -->
+  <section class="card">
+    <h2><span class="badge">1</span> Record or Load</h2>
+    <div class="row">
+      <button id="recordBtn" class="btn rec">● Record</button>
+      <button id="stopRecBtn" class="btn" disabled>■ Stop</button>
+      <span class="rec-time" id="recTime">00:00</span>
+      <span class="sep"></span>
+      <label class="chk">Input
+        <select id="devInput" title="Microphone for recording"><option value="">Default</option></select>
+      </label>
+      <label class="chk">Output
+        <select id="devOutput" title="Speaker for playback"><option value="">Default</option></select>
+      </label>
+      <button class="btn sm" id="refreshDevices" title="Request permission if needed, then relist audio devices">List devices</button>
+      <span class="sep"></span>
+      <label class="btn file" id="loadLabel">Load audio<input type="file" id="fileInput" accept="audio/*" hidden></label>
+      <span class="muted" id="fileMeta">No audio loaded</span>
+      <span class="sep"></span>
+      <button class="btn sm" id="saveBackup" title="Export this recording as WAV so you keep a copy">⬇ Save backup</button>
+      <span class="muted" id="saveStatus"></span>
+    </div>
+    <div class="meter"><div id="meterFill"></div></div>
+  </section>
+
+  <!-- 2. Waveform -->
+  <section class="card" id="waveCard" aria-disabled="true">
+    <h2><span class="badge">2</span> Waveform &amp; Trim / Split</h2>
+    <div class="wave-shell">
+      <canvas id="overview" height="30"></canvas>
+      <div class="wave-main">
+        <canvas id="mainwave" height="120"></canvas>
+        <div id="playhead"></div>
+      </div>
+    </div>
+    <div class="row wave-tools wave-controls">
+      <button id="playBtn" class="btn icon-btn" title="Play / pause (Space)">▶</button>
+      <button id="stopPlayBtn" class="btn icon-btn" disabled title="Stop">■</button>
+      <span class="sep"></span>
+      <span id="speed" class="speed-dial" tabindex="0" role="slider" aria-label="Playback speed" aria-valuemin="1" aria-valuemax="3" aria-valuenow="1.00"
+        title="Drag left / right to change speed · click to add 0.25× · double-click to reset">1.00×</span>
+      <span class="sep"></span>
+      <button class="btn sm" id="zoomIn">＋</button>
+      <button class="btn sm" id="zoomOut">－</button>
+      <button class="btn sm" id="zoomAll">All</button>
+      <span class="muted" id="zoomLabel">1×</span>
+      <span class="sep"></span>
+      <button class="btn sm" id="addSplit">+split</button>
+      <button class="btn sm" id="clearSplits">clear</button>
+      <button class="btn sm" id="normBtn" title="Normalize peak level to −1 dB">Norm</button>
+      <span class="muted" id="splitInfo">0 splits</span>
+      <span class="muted" id="playMode">streaming</span>
+      <span class="muted time" id="cursorTime">—</span>
+    </div>
+    <p class="hint">Scroll to zoom · drag to scroll · click to seek · Ctrl+click to split at that spot · drag a split line to move it</p>
+  </section>
+
+  <!-- 3. Export -->
+  <section class="card" id="exportCard" aria-disabled="true">
+    <h2><span class="badge">3</span> Export</h2>
+    <div class="row">
+      <label class="chk">format
+        <select id="exportFormat">
+          <option value="wav">WAV</option>
+          <option value="mp3" selected>MP3</option>
+        </select>
+      </label>
+      <label class="chk" title="Render exports through the DSP at the current playback speed"><input type="checkbox" id="speedBaked"> speed-baked</label>
+      <label class="chk" title="Protect consonant-like material when baking audio at speed"><input type="checkbox" id="classAware"> class-aware</label>
+      <button class="btn" id="exportAll">Export whole file</button>
+      <button class="btn primary" id="exportClips">Export clips (from splits)</button>
+      <span class="muted" id="exportStatus"></span>
+    </div>
+    <div id="clipList" class="cliplist"></div>
+  </section>
+
+  <!-- 4. Transcript -->
+  <section class="card" id="txCard" aria-disabled="true">
+    <h2><span class="badge">4</span> Transcript</h2>
+    <div class="row">
+      <button id="transcribeBtn" class="btn">Transcribe (Whisper)</button>
+      <label class="chk">scope
+        <select id="transcribeScope">
+          <option value="full">Full file</option>
+        </select>
+      </label>
+      <label class="chk">model
+        <select id="modelSel">
+          <option value="onnx-community/whisper-tiny_timestamped">tiny (fast)</option>
+          <option value="onnx-community/whisper-base_timestamped" selected>base (default)</option>
+          <option value="onnx-community/whisper-small_timestamped">small (accurate)</option>
+        </select>
+      </label>
+      <span class="muted" id="txStatus"></span>
+    </div>
+    <div class="progress"><div id="txProgress"></div></div>
+    <div id="transcript" class="transcript"></div>
+    <div class="row" id="txActions" style="display:none">
+      <button class="btn sm" id="downloadTx">⬇ Download .txt</button>
+      <button class="btn sm" id="downloadSrt">⬇ Download .srt</button>
+    </div>
+  </section>
+</main>
+
+<div id="recoverBanner" class="banner" style="display:none">
+  <span>You have an unsaved recording from a previous session.</span>
+  <button class="btn sm primary" id="recoverYes">Load it</button>
+  <button class="btn sm" id="recoverNo">Discard</button>
+</div>
+
+<script type="module" src="src/main.js"></script>
+</body>
+</html>
