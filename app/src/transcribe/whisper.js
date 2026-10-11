@@ -2,7 +2,19 @@
 import { pipeline, env } from "@huggingface/transformers";
 import { resampleHQ } from "../audio/decode.js";
 
-env.allowLocalModels = false;
+// Both the library and the ONNX Runtime wasm are vendored under app/vendor/, so
+// the desktop build runs with no network at all. The bundled models live in
+// app/models/ and are preferred over the Hub; with the desktop CSP restricted
+// to 'self' there is nothing to fall back to.
+env.allowLocalModels = true;
+env.localModelPath = "./models/";
+try {
+  // ONNX Runtime normally finds its wasm beside the bundle; set it explicitly
+  // too, in case the bundler's path resolution does not apply.
+  if (env.backends && env.backends.onnx && env.backends.onnx.wasm) {
+    env.backends.onnx.wasm.wasmPaths = new URL("../../vendor/transformers/", import.meta.url).href;
+  }
+} catch (e) {}
 
 let current = null;
 let loadedKey = null;

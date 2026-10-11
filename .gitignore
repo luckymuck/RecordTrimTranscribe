@@ -5,5 +5,15 @@ core/pkg-node/
 src-tauri/target/
 src-tauri/gen/
 
+# Bundled Whisper models (fetched by src-tauri/fetch-models.bat, ~360 MB) and
+# the portable build output.
+src-tauri/models/
+src-tauri/app-data/
+dist/
+
 # Node
 node_modules/
+
+# Local scratch: saved Pages run pages and office lock files
+pages build and deployment*
+.~lock.*#

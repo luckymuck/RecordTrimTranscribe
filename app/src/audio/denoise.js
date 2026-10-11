@@ -4,9 +4,8 @@
 // resampled to 48 kHz, denoised, and resampled back. It works in 16-bit units
 // internally, so samples are scaled by 32768 in and out.
 //
-// The vendored copy under `app/vendor/rnnoise/` is loaded first; if it is
-// missing the pinned jsdelivr build is used instead, so the web build works
-// either way and the desktop build works offline.
+// The build is vendored under `app/vendor/rnnoise/` and loaded from there only:
+// the desktop build is strictly offline, so there is no CDN fallback.
 
 import { resampleHQ } from "./decode.js";
 
@@ -14,20 +13,14 @@ import { resampleHQ } from "./decode.js";
 const FRAME = 480;
 /** RNNoise operates on int16-range floats. */
 const SCALE = 32768;
-const CDN_URL = "https://cdn.jsdelivr.net/npm/@echogarden/rnnoise-wasm@0.2.0/rnnoise.js";
 
 let engine = null;
 let loading = null;
 let loadError = null;
 
 async function loadModule() {
-  try {
-    const mod = await import("../../vendor/rnnoise/rnnoise.js");
-    return await mod.default();
-  } catch (localErr) {
-    const mod = await import(/* @vite-ignore */ CDN_URL);
-    return await mod.default();
-  }
+  const mod = await import("../../vendor/rnnoise/rnnoise.js");
+  return await mod.default();
 }
 
 /** Load RNNoise once. Resolves to the engine, or throws. */

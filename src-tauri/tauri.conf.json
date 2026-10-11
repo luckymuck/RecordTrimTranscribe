@@ -13,15 +13,22 @@
         "width": 1120,
         "height": 860,
         "minWidth": 720,
-        "minHeight": 600
+        "minHeight": 600,
+        "useHttpsScheme": true
       }
     ],
+    "withGlobalTauri": false,
     "security": {
-      "csp": "default-src 'self'; script-src 'self' 'wasm-unsafe-eval' https://cdn.jsdelivr.net; connect-src 'self' https://cdn.jsdelivr.net https://huggingface.co https://*.huggingface.co https://*.hf.co; style-src 'self' 'unsafe-inline'; img-src 'self' data: blob:; media-src 'self' blob:; worker-src 'self' blob:; font-src 'self' data:"
+      "csp": "default-src 'self'; script-src 'self' 'wasm-unsafe-eval'; connect-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data: blob:; media-src 'self' blob:; worker-src 'self' blob:; font-src 'self' data:"
     }
   },
   "bundle": {
     "active": true,
-    "targets": ["nsis"]
+    "targets": ["nsis"],
+    "windows": {
+      "webviewInstallMode": {
+        "type": "skip"
+      }
+    }
   }
 }
