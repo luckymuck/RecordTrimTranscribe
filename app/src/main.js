@@ -868,8 +868,17 @@ $("transcribeBtn").addEventListener("click", async () => {
     state.transcript = mergeTranscript(state.transcript, fresh, scope);
     renderTranscript(state.transcript);
     updateSplitLabels();
-    $("txStatus").textContent = state.transcript.timestamped ? "Done" : "Done (no timestamps — model lacked cross-attention data)";
     $("txActions").style.display = "flex";
+    if (raw.stalled) {
+      const pct = Math.round(100 * Math.min(1, (raw.completedSeconds || 0) / duration));
+      $("txStatus").textContent = `Partial transcript (WebGPU stalled at ${pct}%). Uncheck WebGPU and re-run to finish.`;
+      const gpu = $("webgpuChk");
+      if (gpu) gpu.checked = false;
+    } else {
+      $("txStatus").textContent = state.transcript.timestamped
+        ? "Done"
+        : "Done (no timestamps — model lacked cross-attention data)";
+    }
   } catch (e) {
     $("txStatus").textContent =
       e && e.cancelled ? "Cancelled" : "Failed: " + e.message;

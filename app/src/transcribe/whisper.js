@@ -288,9 +288,12 @@ export async function transcribe(pcm, sampleRate, modelId, { onProgress, onStatu
   const baseOptions = language ? { language } : {};
 
   /**
-   * Run one window with a deadline. A stalled WebGPU session never returns, so
-   * on expiry the pipeline is dropped and the same window is retried on WASM
-   * rather than hanging forever.
+   * Run one window with a deadline.
+   *
+   * A stalled WebGPU session never returns, and it keeps the underlying ONNX
+   * session busy, so starting another run -- even on a freshly loaded pipeline
+   * -- fails with "Session already started". The only safe move is to stop and
+   * keep whatever was already transcribed.
    */
   const infer = async (audio, options) => {
     if (cancelled) throw new CancelledError();
@@ -303,23 +306,20 @@ export async function transcribe(pcm, sampleRate, modelId, { onProgress, onStatu
       ]);
     } catch (err) {
       if (cancelled) throw new CancelledError();
-      if (!activeDevice) throw err;
-      onStatus && onStatus("WebGPU stalled — continuing on WASM…");
-      activeDevice = undefined;
-      try {
-        await pipe.dispose();
-      } catch (e) {}
-      current = null;
-      loadedKey = null;
-      pipe = await getPipeline(modelId, onProgress, undefined, onStatus);
-      return withTimeout(pipe(audio, options), WINDOW_TIMEOUT_MS, "window timed out");
+      const message = String((err && err.message) || err);
+      if (activeDevice && /timed out|session already started/i.test(message)) {
+        throw Object.assign(new Error(message), { stalled: true });
+      }
+      throw err;
     }
   };
 
   let text = "";
   const chunks = [];
   let wantTimestamps = true;
+  let completedSeconds = 0;
 
+  try {
   for (let index = 0; index < windows.length; index += 1) {
     if (cancelled) throw new CancelledError();
     const window = windows[index];
@@ -390,7 +390,21 @@ export async function transcribe(pcm, sampleRate, modelId, { onProgress, onStatu
         end: assignEndSeconds,
       });
     }
+    completedSeconds = assignEndSeconds;
     await yieldToUI();
+  }
+  } catch (err) {
+    if (err && err.stalled) {
+      onStatus && onStatus("WebGPU stalled — stopping (partial transcript kept)");
+      return {
+        text,
+        chunks: wantTimestamps ? chunks : null,
+        timestamped: wantTimestamps,
+        stalled: true,
+        completedSeconds,
+      };
+    }
+    throw err;
   }
 
   if (wantTimestamps) {

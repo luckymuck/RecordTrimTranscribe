@@ -140,7 +140,7 @@
           <option value="ko">Korean</option>
         </select>
       </label>
-      <label class="chk" title="Use WebGPU when available (much faster); falls back to WASM"><input type="checkbox" id="webgpuChk"> WebGPU</label>
+      <label class="chk" title="Use WebGPU when available (much faster to start). Experimental: it can stall partway through a long file, in which case the partial transcript is kept and the rest is left for a WASM re-run."><input type="checkbox" id="webgpuChk"> WebGPU</label>
       <span class="muted" id="txStatus"></span>
     </div>
     <div class="progress"><div id="txProgress"></div></div>
