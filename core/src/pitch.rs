@@ -6,7 +6,7 @@
 //! silent regions produce no marks.
 
 use crate::filters::{
-    autocorr, convolve_same, lowpass_kernel, maximum_filter1d_nearest, median_filter_nearest,
+    autocorr, convolve_same, lowpass_kernel, maximum_filter1d_nearest_into, median_filter_nearest,
 };
 
 const EPS: f64 = 1e-12;
@@ -104,6 +104,12 @@ pub fn track_f0(x: &[f64], sr: u32, params: Option<F0Params>) -> F0Track {
     }
 
     let mut window = vec![0.0f64; frame];
+    // Hoisted out of the frame loop: these were allocated per frame, which is
+    // thousands of allocations per second on a hot path (CORE-11).
+    let mut cum = vec![0.0f64; frame + 1];
+    let mut r = vec![0.0f64; hi + 1];
+    let mut band = vec![0.0f64; hi.saturating_sub(lo)];
+    let mut local_max = vec![0.0f64; band.len()];
     for f in 0..n_frames {
         let base = f * hop;
         window.copy_from_slice(&x[base..base + frame]);
@@ -117,24 +123,23 @@ pub fn track_f0(x: &[f64], sr: u32, params: Option<F0Params>) -> F0Track {
 
         // head[lag] = energy of the first frame-lag samples; tail[lag] = energy of
         // the last frame-lag samples (see fasttalk/pitch.py `_track_block`).
-        let mut cum = vec![0.0f64; frame + 1];
+        cum[0] = 0.0;
         for k in 1..=frame {
             cum[k] = cum[k - 1] + window[frame - k] * window[frame - k];
         }
         let total = cum[frame];
 
-        let mut r = vec![0.0f64; hi + 1];
-        for lag in 0..=hi {
+        for (lag, value) in r.iter_mut().enumerate().take(hi + 1) {
             let head = total - cum[lag];
             let tail = cum[frame - lag];
             let denom = (head * tail).max(0.0) + EPS;
-            r[lag] = corr[lag] / denom.sqrt();
+            *value = corr[lag] / denom.sqrt();
         }
 
-        let band: Vec<f64> = r[lo..hi].to_vec();
+        band.copy_from_slice(&r[lo..hi]);
         let band_max = band.iter().cloned().fold(f64::NEG_INFINITY, f64::max);
         let threshold = params.octave_ratio * band_max;
-        let local_max = maximum_filter1d_nearest(&band, 3);
+        maximum_filter1d_nearest_into(&band, 3, &mut local_max);
 
         let mut chosen: Option<usize> = None;
         for i in 0..band.len() {
@@ -265,11 +270,26 @@ pub fn pitch_marks(x: &[f64], sr: u32, track: &F0Track, pitch_range_hz: f64) -> 
             frame += 1;
             continue;
         }
-        // Argmax of |low| over [lo, hi).
+        // Dominant polarity of this voiced run (CORE-6). A glottal pulse train
+        // is asymmetric, so the sign of the third moment of the low-passed
+        // signal says which way its pulses point. Picking `argmax |low|` let the
+        // choice flip between runs, which moves the mark half a period and can
+        // shift the segment's phase.
+        let run_end = (frame..n_frames).find(|&f| !voiced[f]).unwrap_or(n_frames);
+        let run_lo = (frame * track.hop) as i64;
+        let run_hi = ((run_end * track.hop) as i64).min(low.len() as i64);
+        let mut skew = 0.0f64;
+        for i in run_lo..run_hi.max(run_lo + 1) {
+            let v = low[i as usize];
+            skew += v * v * v;
+        }
+        let positive = skew >= 0.0;
+        // Most positive (or most negative) sample in the window, not the largest
+        // magnitude.
         let mut best = lo;
-        let mut best_val = -1.0;
+        let mut best_val = f64::NEG_INFINITY;
         for i in lo..hi {
-            let v = low[i as usize].abs();
+            let v = if positive { low[i as usize] } else { -low[i as usize] };
             if v > best_val {
                 best_val = v;
                 best = i;

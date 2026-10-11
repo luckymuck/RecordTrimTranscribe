@@ -145,7 +145,7 @@ fn skip_keep_list(
 /// Render one kept span at a constant `rate` using the hybrid engine.
 fn stretch_span(x: &[f64], rate: f64, sr: u32) -> Vec<f64> {
     let rate = rate.clamp(1e-3, 1.0);
-    let tm = TimeMap::uniform(x.len() as i64, rate).expect("rate is in (0,1]");
+    let tm = TimeMap::uniform(x.len() as i64, rate).unwrap_or_else(|_| TimeMap::identity(x.len() as i64));
     let rates = hybrid::uniform_rate_plan(x.len() as i64, rate);
     hybrid::render(x, &tm, &rates, sr)
 }
@@ -300,7 +300,8 @@ pub fn silence_zones(samples: &[f32], sample_rate: u32, min_silence_s: f64) -> V
 /// pause, then the rest stretched to `speed`.
 ///
 /// Each kept segment is rendered on its own and concatenated. The joins land at
-/// energy minima (that is what "silence" means), so they need no crossfade.
+/// energy minima (that is what "silence" means), so no long crossfade is needed;
+/// a short one (5 ms) is applied anyway so the seam cannot step.
 #[wasm_bindgen]
 pub fn time_stretch_skip_silence(
     samples: &[f32],
@@ -358,15 +359,17 @@ pub struct BakedMap {
 impl BakedMap {
     #[wasm_bindgen(constructor)]
     pub fn new(samples: &[f32], sample_rate: u32, speed: f64, class_aware: bool) -> BakedMap {
-        let x = to_f64(samples);
         let ratio = ratio_for_speed(speed);
+        let n = samples.len() as i64;
         let map = if class_aware {
-            let segments = rate::align_by_energy(&x, sample_rate);
-            let scale = solve_scale(&segments, x.len() as i64, ratio, sample_rate);
-            let rates = rate::plan_rates(&segments, x.len() as i64, scale, sample_rate);
-            TimeMap::from_rates(&rates, x.len() as i64)
+            // Only the segments are needed here, so segment the f32 samples
+            // directly rather than copying the whole recording to f64 (DS-5).
+            let segments = rate::align_by_energy_f32(samples, sample_rate);
+            let scale = solve_scale(&segments, n, ratio, sample_rate);
+            let rates = rate::plan_rates(&segments, n, scale, sample_rate);
+            TimeMap::from_rates(&rates, n)
         } else {
-            TimeMap::uniform(x.len() as i64, ratio).unwrap()
+            TimeMap::uniform(n, ratio).unwrap_or_else(|_| TimeMap::identity(n))
         };
         BakedMap { map }
     }
@@ -400,11 +403,12 @@ impl SkipBakedMap {
         min_silence_s: f64,
         keep_s: f64,
     ) -> SkipBakedMap {
-        let x = to_f64(samples);
         let ratio = ratio_for_speed(speed);
-        let segments = rate::align_by_energy(&x, sample_rate);
+        let n = samples.len() as i64;
+        // Only the segments are needed here (DS-5).
+        let segments = rate::align_by_energy_f32(samples, sample_rate);
         let scale = if class_aware {
-            solve_scale(&segments, x.len() as i64, ratio, sample_rate)
+            solve_scale(&segments, n, ratio, sample_rate)
         } else {
             ratio
         };
@@ -425,7 +429,7 @@ impl SkipBakedMap {
         for (start, end, rate) in keep {
             let src_len = (end - start).max(1);
             let out_len =
-                TimeMap::uniform(src_len, rate.clamp(1e-3, 1.0)).unwrap().out_length() as f64;
+                TimeMap::uniform(src_len, rate.clamp(1e-3, 1.0)).unwrap_or_else(|_| TimeMap::identity(src_len)).out_length() as f64;
             // The render overlap-crossfades each join, absorbing up to `xf`
             // samples of this piece into the previous one's tail.
             let overlap = if first {

@@ -144,15 +144,31 @@ fn push_run(
 
 /// Segment audio into silence and speech by local energy.
 ///
-/// Returns a contiguous, non-overlapping cover of `[0, len)` labelled
-/// `Class::Silence` or `Class::Speech`.
+/// Returns a cover of `[0, len)` labelled `Class::Silence` or `Class::Speech`.
+/// The runs are contiguous but the analysis frames are 20 ms wide on a 10 ms
+/// hop, so adjacent runs overlap by `frame - hop` (10 ms) in the analysis; the
+/// boundaries themselves are the frame edges (DS-4).
 pub fn align_by_energy(x: &[f64], sr: u32) -> Vec<Segment> {
     let frame = ((0.020 * sr as f64) as usize).max(2);
     let hop = ((0.010 * sr as f64) as usize).max(1);
     let rms = frame_rms(x, frame, hop);
-    let runs = energy_runs(x.len(), &rms, hop, frame);
+    segments_from_runs(energy_runs(x.len(), &rms, hop, frame), x.len())
+}
+
+/// [`align_by_energy`] over `f32` samples, without a full-length `f64` copy.
+///
+/// The map builders only need the segments, not the audio, so they use this to
+/// avoid materialising an 8-bytes-per-sample copy of the recording (DS-5).
+pub fn align_by_energy_f32(x: &[f32], sr: u32) -> Vec<Segment> {
+    let frame = ((0.020 * sr as f64) as usize).max(2);
+    let hop = ((0.010 * sr as f64) as usize).max(1);
+    let rms = frame_rms_f32(x, frame, hop);
+    segments_from_runs(energy_runs(x.len(), &rms, hop, frame), x.len())
+}
+
+fn segments_from_runs(runs: Vec<(i64, i64, bool)>, x_len: usize) -> Vec<Segment> {
     if runs.is_empty() {
-        return vec![Segment::with_class(0, x.len() as i64, "SIL", Class::Silence)];
+        return vec![Segment::with_class(0, x_len as i64, "SIL", Class::Silence)];
     }
     runs.into_iter()
         .map(|(start, end, speech)| {

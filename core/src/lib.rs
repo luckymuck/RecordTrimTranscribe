@@ -11,3 +11,11 @@ pub mod pitch;
 pub mod rate;
 pub mod stream;
 pub mod timing;
+
+/// Install a panic hook so a panic reports its message and location in the
+/// browser console instead of trapping as "unreachable" (CORE-12).
+#[cfg(target_arch = "wasm32")]
+#[wasm_bindgen::prelude::wasm_bindgen(start)]
+pub fn start() {
+    console_error_panic_hook::set_once();
+}

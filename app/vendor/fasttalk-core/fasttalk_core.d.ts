@@ -80,6 +80,12 @@ export function analyze(samples: Float32Array, sample_rate: number): string;
 export function silence_zones(samples: Float32Array, sample_rate: number, min_silence_s: number): Float64Array;
 
 /**
+ * Install a panic hook so a panic reports its message and location in the
+ * browser console instead of trapping as "unreachable" (CORE-12).
+ */
+export function start(): void;
+
+/**
  * Offline time-scale modification of a mono clip.
  *
  * `class_aware` uses an energy-based silence/speech segmentation to allocate the
@@ -93,7 +99,8 @@ export function time_stretch(samples: Float32Array, sample_rate: number, speed: 
  * pause, then the rest stretched to `speed`.
  *
  * Each kept segment is rendered on its own and concatenated. The joins land at
- * energy minima (that is what "silence" means), so they need no crossfade.
+ * energy minima (that is what "silence" means), so no long crossfade is needed;
+ * a short one (5 ms) is applied anyway so the seam cannot step.
  */
 export function time_stretch_skip_silence(samples: Float32Array, sample_rate: number, speed: number, class_aware: boolean, min_silence_s: number, keep_s: number): Float32Array;
 
@@ -115,6 +122,7 @@ export interface InitOutput {
     readonly silence_zones: (a: number, b: number, c: number, d: number) => [number, number];
     readonly skipbakedmap_map_position: (a: number, b: number) => number;
     readonly skipbakedmap_new: (a: number, b: number, c: number, d: number, e: number, f: number, g: number) => number;
+    readonly start: () => void;
     readonly streamstretcher_available_output: (a: number) => number;
     readonly streamstretcher_finish: (a: number) => void;
     readonly streamstretcher_new: (a: number, b: number) => number;
@@ -127,9 +135,10 @@ export interface InitOutput {
     readonly time_stretch: (a: number, b: number, c: number, d: number, e: number) => [number, number];
     readonly time_stretch_skip_silence: (a: number, b: number, c: number, d: number, e: number, f: number, g: number) => [number, number];
     readonly version: () => [number, number];
-    readonly __wbindgen_externrefs: WebAssembly.Table;
-    readonly __wbindgen_malloc: (a: number, b: number) => number;
     readonly __wbindgen_free: (a: number, b: number, c: number) => void;
+    readonly __wbindgen_malloc: (a: number, b: number) => number;
+    readonly __wbindgen_realloc: (a: number, b: number, c: number, d: number) => number;
+    readonly __wbindgen_externrefs: WebAssembly.Table;
     readonly __wbindgen_start: () => void;
 }
 

@@ -10,6 +10,7 @@ export const bakedmap_new: (a: number, b: number, c: number, d: number, e: numbe
 export const silence_zones: (a: number, b: number, c: number, d: number) => [number, number];
 export const skipbakedmap_map_position: (a: number, b: number) => number;
 export const skipbakedmap_new: (a: number, b: number, c: number, d: number, e: number, f: number, g: number) => number;
+export const start: () => void;
 export const streamstretcher_available_output: (a: number) => number;
 export const streamstretcher_finish: (a: number) => void;
 export const streamstretcher_new: (a: number, b: number) => number;
@@ -22,7 +23,8 @@ export const streamstretcher_speed: (a: number) => number;
 export const time_stretch: (a: number, b: number, c: number, d: number, e: number) => [number, number];
 export const time_stretch_skip_silence: (a: number, b: number, c: number, d: number, e: number, f: number, g: number) => [number, number];
 export const version: () => [number, number];
-export const __wbindgen_externrefs: WebAssembly.Table;
-export const __wbindgen_malloc: (a: number, b: number) => number;
 export const __wbindgen_free: (a: number, b: number, c: number) => void;
+export const __wbindgen_malloc: (a: number, b: number) => number;
+export const __wbindgen_realloc: (a: number, b: number, c: number, d: number) => number;
+export const __wbindgen_externrefs: WebAssembly.Table;
 export const __wbindgen_start: () => void;

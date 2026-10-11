@@ -40,13 +40,35 @@ pub fn render(x: &[f64], time_map: &TimeMap, rates: &[SegmentRate], sr: u32) -> 
         return out;
     }
 
-    // Only pay for the overlap-add pass where PSOLA does not fully own the signal.
-    let mut filler = wsola::render(x, time_map, sr, None);
-    filler.resize(out_length, 0.0);
+    // WSOLA only matters where PSOLA does not own the signal, so render it over
+    // those spans rather than the whole signal -- the full pass was paid on
+    // every block even when most of it was voiced (CORE-9). One shared setup
+    // keeps the per-signal analysis from being repeated per span.
+    let margin = ((0.02 * sr as f64).round() as usize).max(1);
+    let mut filler = vec![0.0f64; out_length];
+    let setup = wsola::WsolaSetup::new(x, time_map, sr, None);
+    let mut i = 0usize;
+    while i < out_length {
+        if weight[i] >= 1.0 {
+            i += 1;
+            continue;
+        }
+        let start = i;
+        while i < out_length && weight[i] < 1.0 {
+            i += 1;
+        }
+        let lo = start.saturating_sub(margin);
+        let hi = (i + margin).min(out_length);
+        let span = setup.render_span(time_map, lo, hi);
+        filler[lo..lo + span.len()].copy_from_slice(&span);
+    }
     apply_copy_through(&mut filler, x, time_map, rates, out_length);
 
     for i in 0..out_length {
         let w = weight[i];
+        if w >= 1.0 {
+            continue; // PSOLA fully owns this sample
+        }
         out[i] = out[i] * w + filler[i] * (1.0 - w);
     }
     out

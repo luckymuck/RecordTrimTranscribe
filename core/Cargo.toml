@@ -13,6 +13,11 @@ realfft = "3"
 rustfft = "6"
 wasm-bindgen = "0.2"
 
+# Panics in WASM otherwise surface as an opaque "unreachable" trap with no
+# message (CORE-12). WASM only; the native test build does not need it.
+[target.'cfg(target_arch = "wasm32")'.dependencies]
+console_error_panic_hook = "0.1"
+
 [dev-dependencies]
 approx = "0.5"
 

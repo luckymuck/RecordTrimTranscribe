@@ -192,7 +192,7 @@ impl StreamStretcher {
         let rendered: Vec<f64> = if (ratio - 1.0).abs() < 1e-9 {
             buf
         } else {
-            let tm = TimeMap::uniform(buf.len() as i64, ratio).expect("ratio is in (0,1]");
+            let tm = TimeMap::uniform(buf.len() as i64, ratio).unwrap_or_else(|_| TimeMap::identity(buf.len() as i64));
             let rates = hybrid::uniform_rate_plan(buf.len() as i64, ratio);
             hybrid::render(&buf, &tm, &rates, self.sr)
         };

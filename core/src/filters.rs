@@ -90,13 +90,21 @@ pub fn median_filter_nearest(x: &[f64], size: usize) -> Vec<f64> {
 }
 
 /// Sliding maximum with index clamping (`scipy.ndimage.maximum_filter1d`).
-pub fn maximum_filter1d_nearest(x: &[f64], size: usize) -> Vec<f64> {
+/// Maximum filter with edge clamping, writing into a reused buffer.
+///
+/// `track_f0` runs this once per frame; allocating a fresh output each time was
+/// a per-frame allocation on a hot path (CORE-11).
+pub fn maximum_filter1d_nearest_into(x: &[f64], size: usize, out: &mut [f64]) {
     let n = x.len();
-    if n == 0 || size <= 1 {
-        return x.to_vec();
+    assert!(out.len() >= n, "maximum filter output buffer is too small");
+    if n == 0 {
+        return;
+    }
+    if size <= 1 {
+        out[..n].copy_from_slice(x);
+        return;
     }
     let half = size / 2;
-    let mut out = vec![0.0f64; n];
     for i in 0..n {
         let mut m = f64::NEG_INFINITY;
         for j in 0..size {
@@ -107,6 +115,11 @@ pub fn maximum_filter1d_nearest(x: &[f64], size: usize) -> Vec<f64> {
         }
         out[i] = m;
     }
+}
+
+pub fn maximum_filter1d_nearest(x: &[f64], size: usize) -> Vec<f64> {
+    let mut out = vec![0.0f64; x.len()];
+    maximum_filter1d_nearest_into(x, size, &mut out);
     out
 }
 

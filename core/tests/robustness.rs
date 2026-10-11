@@ -289,3 +289,76 @@ fn noise_floor_pauses_are_detected_and_joined_cleanly() {
         baked.len()
     );
 }
+// ── Batch B: DSP-low regressions ────────────────────────────────────────────
+
+/// DS-5: segmenting f32 samples directly must agree with the f64 path. The map
+/// builders use the f32 entry point to avoid copying the whole recording.
+#[test]
+fn f32_and_f64_segmentation_agree() {
+    use fasttalk_core::rate::{align_by_energy, align_by_energy_f32};
+    let x = speech_like(4.0, SR, 0.01);
+    let xf64: Vec<f64> = x.iter().map(|v| *v as f64).collect();
+    let a = align_by_energy(&xf64, SR);
+    let b = align_by_energy_f32(&x, SR);
+    assert_eq!(a.len(), b.len(), "segment count differs: {} vs {}", a.len(), b.len());
+    let hop = (0.010 * SR as f64) as i64;
+    for (i, (p, q)) in a.iter().zip(b.iter()).enumerate() {
+        assert!(
+            (p.start - q.start).abs() <= hop && (p.end - q.end).abs() <= hop,
+            "segment {i}: ({}, {}) vs ({}, {})",
+            p.start, p.end, q.start, q.end
+        );
+    }
+}
+
+/// CORE-6: marks must sit on the dominant polarity of the pulse train rather
+/// than on whichever peak has the larger magnitude.
+#[test]
+fn glottal_marks_follow_the_pulse_polarity() {
+    use fasttalk_core::pitch::{pitch_marks, track_f0};
+    let sr = 16000;
+    let n = sr as usize;
+    let period = sr as f64 / 140.0;
+    // Sharp rise, slow decay: positive-dominant, and zero-mean over a period.
+    let x: Vec<f64> = (0..n)
+        .map(|i| {
+            let phase = (i as f64 % period) / period;
+            (1.0 - phase).powi(3) - 0.25
+        })
+        .collect();
+    let track = track_f0(&x, sr, None);
+    let marks = pitch_marks(&x, sr, &track, 900.0);
+    assert!(marks.len() > 50, "too few marks: {}", marks.len());
+    let positive = marks.iter().filter(|&&m| x[m as usize] > 0.0).count();
+    let frac = positive as f64 / marks.len() as f64;
+    assert!(
+        frac > 0.95,
+        "only {:.0}% of marks land on the dominant polarity",
+        frac * 100.0
+    );
+}
+
+/// CORE-9: a span-limited WSOLA render must equal the corresponding slice of a
+/// full render. The synthesis grid is absolute and each window's source choice
+/// comes from the time map alone, so nothing about the result depends on where
+/// the span starts.
+#[test]
+fn span_wsola_matches_the_full_render() {
+    use fasttalk_core::engines::wsola;
+    use fasttalk_core::timing::TimeMap;
+    let sr = 16000;
+    let x: Vec<f64> = speech_like(3.0, sr, 0.01).iter().map(|v| *v as f64).collect();
+    let tm = TimeMap::uniform(x.len() as i64, 0.5).unwrap();
+    let full = wsola::render(&x, &tm, sr, None);
+    let frame = (0.032 * sr as f64) as usize;
+    for (lo, hi) in [(0usize, 8000usize), (8000, 16000), (16000, full.len())] {
+        let span = wsola::render_range(&x, &tm, sr, None, lo, hi);
+        assert_eq!(span.len(), hi - lo, "span length");
+        // Only the first frame can differ: it is the one place where the set of
+        // overlapping windows depends on the span's start.
+        for i in frame..(hi - lo) {
+            let d = (span[i] - full[lo + i]).abs();
+            assert!(d < 1e-9, "span ({lo},{hi}) sample {i} differs by {d}");
+        }
+    }
+}
