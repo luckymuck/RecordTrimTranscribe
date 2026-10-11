@@ -160,13 +160,21 @@ restricted to `'self'`.
 .\build-portable.bat
 ```
 
-The executable is around 390 MB because the models are inside it. Run it from
-any writable folder: no installation, no registry entries, and no shortcuts.
-Everything the app saves — recordings, sessions, settings and the model cache —
-lives in an `app-data` folder created beside the executable (via Tauri's
-`appDirectoriesOverride`), so the whole folder can be moved, copied to a USB
-stick, or deleted without leaving anything behind. Windows 10 (April 2018+) and
-Windows 11 already include the WebView2 runtime the app needs.
+The executable is **235 MB** because the models are inside it (Tauri compresses
+the embedded assets). Run it from any writable folder: no installation, no
+registry entries, and no shortcuts. Everything the app saves — recordings,
+sessions, settings and the model cache — lives in an `app-data` folder created
+beside the executable (via Tauri's `appDirectoriesOverride`), so the whole folder
+can be moved, copied to a USB stick, or deleted without leaving anything behind.
+Windows 10 (April 2018+) and Windows 11 already include the WebView2 runtime the
+app needs.
+
+Both scripts need either Tauri CLI — `cargo install tauri-cli`, or
+`npm i -D @tauri-apps/cli`, which `build-portable.bat` picks up automatically
+through `npx`. The **first** build compiles the whole Tauri dependency tree and
+takes roughly 25 minutes; later builds reuse it and take about three. The icon
+set under `src-tauri/icons/` is committed, so `tauri icon` is only needed if you
+want to replace it (`tauri icon src-tauri/app-icon.png`).
 
 The models come from `onnx-community/whisper-{tiny,base,small}_timestamped` at
 pinned revisions, and only the files that are actually loaded are fetched: the
