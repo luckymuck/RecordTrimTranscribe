@@ -14,8 +14,8 @@ Shortcuts & editing:
 - **Ctrl+click** on the waveform adds a split at that spot.
 - **Right-click** a split line to delete it.
 - With the waveform focused: **arrows** nudge the cursor (**Shift** = ten steps),
-  **Home/End** jump to the ends, and **[** / **]** add and remove a split at the
-  cursor.
+  **Home/End** jump to the ends, **Enter** (or **[**) adds a split at the cursor
+  and **]** removes the nearest one.
 - Each split is labelled on the waveform with its time and clip number
   (`3:15-01`), optionally followed by the first words of that clip's transcript
   (`3:15-01-Good morning this is`).

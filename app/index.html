@@ -60,7 +60,7 @@
     <div class="wave-shell">
       <canvas id="overview" height="30" tabindex="0" aria-label="Overview waveform"></canvas>
       <div class="wave-main">
-        <canvas id="mainwave" height="120" tabindex="0" aria-label="Waveform — arrow keys move the cursor, [ and ] add and remove splits"></canvas>
+        <canvas id="mainwave" height="120" tabindex="0" aria-label="Waveform — arrow keys move the cursor, Enter adds a split at it, ] removes the nearest split"></canvas>
         <div id="playhead"></div>
       </div>
     </div>
@@ -90,7 +90,7 @@
       <span class="muted" id="splitInfo">0 splits</span>
       <span class="muted time" id="cursorTime">—</span>
     </div>
-    <p class="hint">Scroll to zoom · drag to scroll · click to seek · Ctrl+click to split at that spot · drag a split line to move it</p>
+    <p class="hint">Scroll to zoom · drag to scroll · click to seek · Ctrl+click to split at that spot · drag a split line to move it · with the waveform focused: arrows move the cursor, Enter adds a split at it</p>
   </section>
 
   <!-- 3. Export -->

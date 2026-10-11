@@ -679,8 +679,9 @@ $("addSplit").addEventListener("click", () => {
 $("clearSplits").addEventListener("click", () => waveform.clearSplits());
 
 // ── Keyboard control of the waveform (UI-2) ─────────────────────────────────
-// The canvases are focusable; arrows nudge the cursor (Shift = ten steps) and
-// [ / ] add and remove a split at it.
+// The canvases are focusable; arrows nudge the cursor (Shift = ten steps),
+// Home/End jump to the ends, Enter (or [) adds a split at the cursor and ]
+// removes the nearest one.
 {
   // One step is 1% of the visible range, so it stays useful at every zoom.
   const stepSamples = () => Math.max(1, Math.round((waveform.viewLen || 1) / 100));
@@ -706,7 +707,9 @@ $("clearSplits").addEventListener("click", () => waveform.clearSplits());
     } else if (e.key === "End") {
       e.preventDefault();
       moveCursor(state.pcm.length);
-    } else if (e.key === "[") {
+    } else if (e.key === "Enter" || e.key === "[") {
+      // Split where the cursor is. `addSplit` rejects positions at the very
+      // start/end and duplicates, so pressing Enter twice is harmless.
       e.preventDefault();
       waveform.addSplit(state.cursorSample);
     } else if (e.key === "]") {
