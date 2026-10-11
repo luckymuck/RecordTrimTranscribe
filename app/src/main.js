@@ -25,6 +25,11 @@ import { cleanUp, cleanupActive, cleanupOptions, cleanupSummary } from "./audio/
 
 const $ = (id) => document.getElementById(id);
 
+/** True inside the Tauri desktop shell, where the models ship with the app. */
+function isDesktopApp() {
+  return location.hostname === "tauri.localhost" || location.protocol === "tauri:";
+}
+
 const state = {
   pcm: null,
   sampleRate: 48000,
@@ -1105,15 +1110,17 @@ function mergeTranscript(existing, fresh, scope) {
 // ── Transcription ─────────────────────────────────────────────────────────────
 $("transcribeBtn").addEventListener("click", async () => {
   if (!state.pcm) return;
-  // Warn before the first model download: it is 40-250 MB and the app
-  // otherwise gives no hint that anything is fetched (TX-13).
-  if (!modelNoteShown) {
+  // Warn before the first model download: it is 40-250 MB and the web app
+  // otherwise gives no hint that anything is fetched (TX-13). The desktop build
+  // ships the models, so there is nothing to warn about there.
+  if (!modelNoteShown && !isDesktopApp()) {
     modelNoteShown = true;
     const size = MODEL_SIZES[$("modelSel").value] || "tens to hundreds of megabytes";
     const free = await freeStorageText();
     const ok = confirm(
-      `The transcription model is about ${size} and is downloaded once from the CDN, then cached ` +
-        `by the browser. Nothing is uploaded.${free ? ` Free storage: ${free}.` : ""}\n\nContinue?`
+      `The transcription model is about ${size} and is downloaded once from the ` +
+        `Hugging Face Hub, then cached by the browser. Nothing is uploaded.` +
+        `${free ? ` Free storage: ${free}.` : ""}\n\nContinue?`
     );
     if (!ok) return;
   }

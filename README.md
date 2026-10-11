@@ -1,301 +1,237 @@
-# Record · Trim · Transcribe
+﻿# Record Â· Trim Â· Transcribe
 
-A local-first audio tool with four capabilities:
+A local-first audio tool with the following capabilities:
 
-1. **Record** microphone audio (or load a file) as WAV/MP3.
-2. **Play back at 1.0–4.0×** while staying intelligible, using a port of the
-   [FastTalk](../FastTalk) pitch-preserving time-scale modification pipeline.
-3. **Transcribe** on-device with Whisper (transformers.js, WASM), using the
-   `*_timestamped` ONNX exports so clickable word timestamps work.
-4. **Trim / split** into separate clips and export as WAV or MP3.
-5. **Clean up** a recording before it is stretched: rumble filter, RNNoise
-   denoise, consonant boost, normalize, and a peak limiter.
+1. **Record **audio.
+
+2. **Load local audio files.**
+
+3. **Clean up** with: rumble filter, RNNoiseÂ denoise, consonant boost, normalize, and peak limiter.
+
+4. **Playback at 1.0â€“4.0Ã—** while maximizing intelligibility by preserving consonant sounds.
+
+5. **Transcribe** on-device with Whisper.
+
+6. **Trim/Split** audio into separate clips.
+
+7. **Export/Save **as WAV or MP3.
 
 Shortcuts & editing:
+
 - **Space** toggles play/stop at the playhead, as does the transport button.
-- **Ctrl+Z** undoes the last edit and **Ctrl+Y** redoes it; on macOS **Cmd+Z** /
-  **Cmd+Shift+Z** work too. Edits include adding, moving, deleting and clearing
-  splits, not just clean up.
-- **Ctrl+click** on the waveform adds a split at that spot.
-- **Right-click** a split line to delete it, or click the small bin at the lower
-  left of the line.
-- With the waveform focused: **arrows** nudge the cursor (**Shift** = ten steps),
-  **Home/End** jump to the ends, **Enter** (or **[**) adds a split at the cursor
-  and **]** removes the nearest one.
-- Each split is labelled on the waveform with its time and clip number
-  (`3:15-01`), optionally followed by the first words of that clip's transcript
-  (`3:15-01-Good morning this is`).
-- Clips are named `<source> - <nn> - <HHMMSS>` from the clip's start position,
-  e.g. `talk - 02 - 001345`, and each name stays editable in step 3.
-- A recording's default name is `MMDDYYYY HHMM` from when it **started**; a
-  loaded file keeps its filename with the extension stripped.
-- Step 1 lets you pick the recording **input** and playback **output** devices.
-  Use **List devices** to grant microphone permission when labels are unavailable;
-  browsers hide device identities until permission is granted.
-- Transcripts can cover **the full file or one clip**, with clip timestamps mapped
-  back to whole-file positions. Lines target about 84 visible characters and still
-  end at sentence punctuation.
+
+- **Ctrl+click** on waveform to add a split.
+
+- With the waveform focused: **arrows** nudge the cursor (**Shift** = ten steps),Â **Home/End** jump to the ends, **Enter** (or **\[**) adds a split at the cursorÂ and **\]** removes the nearest one.
+
+- **Ctrl+Z** / **Ctrl+Y** - undo/redo; on macOS **Cmd+Z** /Â **Cmd+Shift+Z** work too. Edits include adding, moving, deleting and clearingÂ splits, not just clean up.
+
+- Use **List devices** to grant microphone permission when labels are unavailable;Â browsers hide device identities until permission is granted.
+
+- Transcripts can cover **the full file or one clip**, with clip timestamps mappedÂ back to whole-file positions. Lines target about 84 visible characters and stillÂ end at sentence punctuation.
 
 ## Recording safety
-A clip is never silently lost:
 
-- The current clip is **autosaved to IndexedDB**; after any browser close you are
-  offered the previous session's recording on next launch.
-- Starting a new recording or loading a file first asks for confirmation when the
-  current clip is not yet exported/saved.
-- Closing/leaving the page (Back, refresh) triggers a browser warning while an
-  unsaved clip is loaded.
-- The **Save backup** button (step 1) exports the current clip as WAV and marks it
-  saved; the saved/unsaved state is shown next to it.
+- The current clip is **autosaved to IndexedDB**; after any browser close you areÂ offered the previous session's recording on next launch.
+
+- Starting a new recording or loading a file first asks for confirmation when theÂ current clip is not yet exported/saved.
+
+- Closing/leaving the page (Back, refresh) triggers a browser warning while anÂ unsaved clip is loaded.
+
+- The **Save backup** button (step 1) exports the current clip as WAV and marks itÂ saved; the saved/unsaved state is shown next to it.
 
 It ships two ways from a single codebase:
 
-- **Website** — a static client (`app/`) served locally. All audio decoding, DSP,
-  transcription and encoding run in the browser; nothing is uploaded.
-- **GitHub Pages** — the repository’s `Deploy Pages` workflow publishes `app/`.
-  After the first successful run, the page is available at
-  `https://luckymuck.github.io/RecordTrimTranscribe/`.
-- **Windows app** — the same `app/` assets wrapped in a Tauri shell that uses the
-  built-in WebView2 runtime. No Python, Node or Rust needed to run it.
+- **Website** â€” a static client (`app/`) served locally. All audio decoding, DSP,Â transcription and encoding run in the browser; nothing is uploaded.
+
+- **GitHub Pages** â€” the repositoryâ€™s `Deploy Pages` workflow publishes `app/`.Â After the first successful run, the page is available atÂ `https://luckymuck.github.io/RecordTrimTranscribe/`.
+
+- **Windows app** â€” the same `app/` assets wrapped in a Tauri shell that uses theÂ built-in WebView2 runtime. No Python, Node or Rust needed to run it.
 
 ## Layout
 
 ```
-app/                     The whole product surface (static, client-side)
-  index.html             UI: record / waveform+playback / export / transcript
-  styles.css
-  src/
-    core/dsp.js          loads the WASM DSP core, exposes timeStretch/StreamStretcher
-    audio/               decode, MediaRecorder capture, WAV + MP3 encoders,
-                         normalization arithmetic, RNNoise denoise, clean-up chain
-    ui/waveform.js       overview + zoomable waveform, playhead, split markers
-    ui/speed.js          speed-dial arithmetic (1.00x-4.00x, no slow-down)
-    ui/view.js           zoom/pan arithmetic
-    playback.js          streaming (real-time) + offline bake
-    transcribe/whisper.js  transformers.js Whisper pipeline
-    transcript/format.js   SRT / VTT / plain-text export formatting
-    export/clips.js      split/slice + download
-    export/boundaries.js split validation and clip boundaries
-    util/filenames.js    download filename construction
-  test/                  Node unit tests (node --test app/test/*.test.mjs)
-  vendor/fasttalk-core/  wasm-pack output (generated by build-wasm.bat)
-  vendor/rnnoise/        RNNoise wasm + glue for the denoise stage (see NOTICE.md)
-  vendor/lamejs/         MP3 encoder (LGPL-3.0)
-  vendor/transformers/   transformers.js bundle + ONNX Runtime wasm (Apache-2.0 / MIT)
-core/                    Rust crate `fasttalk-core` (the DSP), compiled to WASM
-  src/
-    classes.rs           ARPAbet -> articulatory class, floors, multipliers
-    timing.rs            Segment, SegmentRate, TimeMap, MapWalker
-    pitch.rs             F0 tracking + glottal mark placement
-    filters.rs           FFT autocorrelation, windows, filters
-    engines/wsola.rs     overlap-add engine
-    engines/psola.rs     TD-PSOLA engine
-    engines/hybrid.rs    copy-through / PSOLA / WSOLA composition
-    enhance.rs           rumble high-pass, consonant boost, normalize, soft limiter
-    rate.rs              energy alignment + class-aware rate allocation
-    stream.rs            real-time streaming time-stretch
-    api.rs               wasm-bindgen exports
-  tests/                 cargo test: continuity, skip-silence, robustness, enhance
-  dsp_smoke.mjs          Node smoke test of the WASM bindings
-src-tauri/               Tauri v2 shell for the desktop build
-  tauri.portable.conf.json  portable-only config (data beside the exe)
-  fetch-models.bat       download the bundled Whisper models (~360 MB, one-time)
-  models/                the downloaded models (gitignored)
-server.py                local static server (the "website" launcher)
-build-wasm.bat           rebuild core -> app/vendor/fasttalk-core
-build-portable.bat       build the stand-alone offline portable build + ZIP
+app/                     The whole product surface (static, client-side)  
+  index.html             UI: record / waveform+playback / export / transcript  
+  styles.css  
+  src/  
+    core/dsp.js          loads the WASM DSP core, exposes timeStretch/StreamStretcher  
+    audio/               decode, MediaRecorder capture, WAV + MP3 encoders,  
+                         normalization arithmetic, RNNoise denoise, clean-up chain  
+    ui/waveform.js       overview + zoomable waveform, playhead, split markers  
+    ui/speed.js          speed-dial arithmetic (1.00x-4.00x, no slow-down)  
+    ui/view.js           zoom/pan arithmetic  
+    playback.js          streaming (real-time) + offline bake  
+    transcribe/whisper.js  transformers.js Whisper pipeline  
+    transcript/format.js   SRT / VTT / plain-text export formatting  
+    export/clips.js      split/slice + download  
+    export/boundaries.js split validation and clip boundaries  
+    util/filenames.js    download filename construction  
+  test/                  Node unit tests (node --test app/test/\*.test.mjs)  
+  vendor/fasttalk-core/  wasm-pack output (generated by build-wasm.bat)  
+  vendor/rnnoise/        RNNoise wasm + glue for the denoise stage (see NOTICE.md)  
+  vendor/lamejs/         MP3 encoder (LGPL-3.0)  
+  vendor/transformers/   transformers.js bundle + ONNX Runtime wasm (Apache-2.0 / MIT)  
+core/                    Rust crate \`fasttalk-core\` (the DSP), compiled to WASM  
+  src/  
+    classes.rs           ARPAbet -\> articulatory class, floors, multipliers  
+    timing.rs            Segment, SegmentRate, TimeMap, MapWalker  
+    pitch.rs             F0 tracking + glottal mark placement  
+    filters.rs           FFT autocorrelation, windows, filters  
+    engines/wsola.rs     overlap-add engine  
+    engines/psola.rs     TD-PSOLA engine  
+    engines/hybrid.rs    copy-through / PSOLA / WSOLA composition  
+    enhance.rs           rumble high-pass, consonant boost, normalize, soft limiter  
+    rate.rs              energy alignment + class-aware rate allocation  
+    stream.rs            real-time streaming time-stretch  
+    api.rs               wasm-bindgen exports  
+  tests/                 cargo test: continuity, skip-silence, robustness, enhance  
+  dsp\_smoke.mjs          Node smoke test of the WASM bindings  
+src-tauri/               Tauri v2 shell for the desktop build  
+  tauri.portable.conf.json  portable-only config (data beside the exe)  
+  fetch-models.bat       download the bundled Whisper models (~360 MB, one-time)  
+  models/                the downloaded models (gitignored)  
+server.py                local static server (the "website" launcher)  
+build-wasm.bat           rebuild core -\> app/vendor/fasttalk-core  
+build-portable.bat       build the stand-alone offline portable build + ZIP  
 start-website.bat        launch the website
 ```
 
 ## Running the website
 
-```powershell
-python server.py            # or: start-website.bat
+```
+python server.py            \# or: start-website.bat
 ```
 
-Then open the printed `http://127.0.0.1:8770/` address. A local server is required
-because ES modules and WASM need HTTP (and a correct `application/wasm` MIME type);
-`server.py` provides both.
+Then open the printed `http://127.0.0.1:8770/` address. A local server is requiredÂ because ES modules and WASM need HTTP (and a correct `application/wasm` MIME type);Â `server.py` provides both.
 
-On first transcription the Whisper weights (about 40 MB for tiny, 75 MB for base,
-250 MB for small) are downloaded once and cached by the browser; the app warns
-before the first download. Timestamped transcription requires a model exported
-with `output_attentions=True`; the app defaults to
-`onnx-community/whisper-base_timestamped` and falls back to plain transcription
-if the chosen model cannot produce timestamps.
+On first transcription the Whisper weights (about 40 MB for tiny, 75 MB for base,Â 250 MB for small) are downloaded once and cached by the browser; the app warnsÂ before the first download. Timestamped transcription requires a model exportedÂ with `output\_attentions=True`; the app defaults toÂ `onnx-community/whisper-base\_timestamped` and falls back to plain transcriptionÂ if the chosen model cannot produce timestamps.
 
 ## Running / building the desktop app
 
-Prerequisites (build-time only): Rust, and the Tauri CLI (`cargo install tauri-cli`
-or `npm i -D @tauri-apps/cli`). WebView2 is already present on Windows 10/11.
+Prerequisites (build-time only): Rust, and the Tauri CLI (`cargo install tauri-cli`Â or `npm i -D @tauri-apps/cli`). WebView2 is already present on Windows 10/11.
 
-```powershell
-# 1. Build the DSP core once
-.\build-wasm.bat
-
-# 2. Generate icons from a square PNG (one-time)
-cd src-tauri
-cargo tauri icon path\to\icon.png
-
-# 3. Build the bundle
+```
+\# 1. Build the DSP core once  
+.\\build-wasm.bat  
+  
+\# 2. Generate icons from a square PNG (one-time)  
+cd src-tauri  
+cargo tauri icon path\\to\\icon.png  
+  
+\# 3. Build the bundle  
 cargo tauri build
 ```
 
-The bundle is written under `src-tauri/target/release/bundle/` (an NSIS
-installer).
+The bundle is written under `src-tauri/target/release/bundle/` (an NSISÂ installer).
 
 ### Portable, fully offline build
 
-`.\build-portable.bat` produces a self-contained folder and ZIP under `dist/`.
-The app makes **no network requests at all**: the DSP, the MP3 encoder, RNNoise,
-transformers.js and the ONNX Runtime wasm are all vendored under `app/vendor/`,
-the three Whisper models are embedded in the executable, and the desktop CSP is
-restricted to `'self'`.
+`.\\build-portable.bat` produces a self-contained folder and ZIP under `dist/`.Â The app makes **no network requests at all**: the DSP, the MP3 encoder, RNNoise,Â transformers.js and the ONNX Runtime wasm are all vendored under `app/vendor/`,Â the three Whisper models are embedded in the executable, and the desktop CSP isÂ restricted to `'self'`.
 
-```powershell
-# once: download the three models into src-tauri/models (~360 MB)
-.\src-tauri\fetch-models.bat
-
-# build dist\portable\RecordTrimTranscribe\ and the ZIP
-.\build-portable.bat
+```
+\# once: download the three models into src-tauri/models (~360 MB)  
+.\\src-tauri\\fetch-models.bat  
+  
+\# build dist\\portable\\RecordTrimTranscribe\\ and the ZIP  
+.\\build-portable.bat
 ```
 
-The executable is **235 MB** because the models are inside it (Tauri compresses
-the embedded assets). Run it from any writable folder: no installation, no
-registry entries, and no shortcuts. Everything the app saves — recordings,
-sessions, settings and the model cache — lives in an `app-data` folder created
-beside the executable (via Tauri's `appDirectoriesOverride`), so the whole folder
-can be moved, copied to a USB stick, or deleted without leaving anything behind.
-Windows 10 (April 2018+) and Windows 11 already include the WebView2 runtime the
-app needs.
+The executable is **235 MB** because the models are inside it (Tauri compressesÂ the embedded assets). Run it from any writable folder: no installation, noÂ registry entries, and no shortcuts. Everything the app saves â€” recordings,Â sessions, settings and the model cache â€” lives in an `app-data` folder createdÂ beside the executable (via Tauri's `appDirectoriesOverride`), so the whole folderÂ can be moved, copied to a USB stick, or deleted without leaving anything behind.Â Windows 10 (April 2018+) and Windows 11 already include the WebView2 runtime theÂ app needs.
 
-Both scripts need either Tauri CLI — `cargo install tauri-cli`, or
-`npm i -D @tauri-apps/cli`, which `build-portable.bat` picks up automatically
-through `npx`. The **first** build compiles the whole Tauri dependency tree and
-takes roughly 25 minutes; later builds reuse it and take about three. The icon
-set under `src-tauri/icons/` is committed, so `tauri icon` is only needed if you
-want to replace it (`tauri icon src-tauri/app-icon.png`).
+Both scripts need either Tauri CLI â€” `cargo install tauri-cli`, orÂ `npm i -D @tauri-apps/cli`, which `build-portable.bat` picks up automaticallyÂ through `npx`. The **first** build compiles the whole Tauri dependency tree andÂ takes roughly 25 minutes; later builds reuse it and take about three. The iconÂ set under `src-tauri/icons/` is committed, so `tauri icon` is only needed if youÂ want to replace it (`tauri icon src-tauri/app-icon.png`).
 
-The models come from `onnx-community/whisper-{tiny,base,small}_timestamped` at
-pinned revisions, and only the files that are actually loaded are fetched: the
-config/tokenizer JSON and the two `q8` ONNX graphs. They are laid out the way
-transformers.js expects for a local model, `<localModelPath>/<modelId>/<file>`,
-and are served from `models/` inside the app. `src-tauri/models/` and `dist/` are
-gitignored, so the repository stays small.
+The models come from `onnx-community/whisper-\{tiny,base,small\}\_timestamped` atÂ pinned revisions, and only the files that are actually loaded are fetched: theÂ config/tokenizer JSON and the two `q8` ONNX graphs. They are laid out the wayÂ transformers.js expects for a local model, `\<localModelPath\>/\<modelId\>/\<file\>`,Â and are served from `models/` inside the app. `src-tauri/models/` and `dist/` areÂ gitignored, so the repository stays small.
+
+### Distributing the portable build
+
+Attach the ZIP to a GitHub **Release** rather than committing it: Releases allow
+files up to 2 GiB with no bandwidth limit, whereas Pages caps a site at 1 GB and
+100 GB of bandwidth a month, and git would keep a 231 MB blob in history forever.
+`dist/portable/SHA256SUMS.txt` holds the checksums of the executable and the ZIP,
+so a download can be verified.
+
+The executable is **not code-signed**, so Windows shows "Windows protected your
+PC" the first time it runs and the user has to choose *More info â†’ Run anyway*.
+Worth stating in the release notes as well as in the bundled `README.txt`. Code
+signing would remove the prompt but needs a certificate.
+
+Each portable folder ships `LICENSE` (GPL-3.0) and `THIRD-PARTY-NOTICES.txt`,
+listing every bundled component with its licence: lamejs (LGPL-3.0, acknowledged
+and shipped as its own replaceable file), transformers.js (Apache-2.0), ONNX
+Runtime (MIT), RNNoise (BSD-3-Clause) and the Whisper models (ONNX conversions of
+OpenAI's Apache-2.0 weights).
 
 ## How the DSP port works
 
-`core/` is a faithful port of FastTalk's Python signal processing. The two facts
-that shape it (both asserted in FastTalk's own test suite and reproduced here in
-`core/src` unit tests):
+`core/` is a faithful port of FastTalk's Python signal processing. The two factsÂ that shape it (both asserted in FastTalk's own test suite and reproduced here inÂ `core/src` unit tests):
 
-- **TD-PSOLA is the primary engine for voiced material.** Generic overlap-add
-  cancels between windows sitting at different phases of the fundamental. PSOLA
-  aligns windows to glottal closure instants. `psola::render` holds pitch within
-  50 cents down to 0.35× (`psola_preserves_pitch_on_a_steady_tone`).
-- **The synthesis grid advances at the analysis pitch period**, not by mapping every
-  input mark through the time map (`psola.rs::output_marks`). Mapping marks directly
-  degenerates into resampling and shifts pitch by `1/ratio`.
+- **TD-PSOLA is the primary engine for voiced material.** Generic overlap-addÂ cancels between windows sitting at different phases of the fundamental. PSOLAÂ aligns windows to glottal closure instants. `psola::render` holds pitch withinÂ 50 cents down to 0.35Ã— (`psola\_preserves\_pitch\_on\_a\_steady\_tone`).
 
-Unvoiced/silent material falls back to WSOLA; stop closures/bursts are copied
-through verbatim (`hybrid.rs`).
+- **The synthesis grid advances at the analysis pitch period**, not by mapping everyÂ input mark through the time map (`psola.rs::output\_marks`). Mapping marks directlyÂ degenerates into resampling and shifts pitch by `1/ratio`.
+
+Unvoiced/silent material falls back to WSOLA; stop closures/bursts are copiedÂ through verbatim (`hybrid.rs`).
 
 ### Playback modes
 
-- **Streaming (real-time).** `StreamStretcher` renders the buffered audio in short
-  blocks using the *same* hybrid engine used offline (`engines::hybrid`), with a
-  small look-behind so pitch marks and window ramps are fully established at every
-  emit boundary and a short crossfade across each seam. At **1.0× it is a direct
-  passthrough** (no DSP at all), so plain-speed playback is bit-for-bit the source
-  and can never click or pop. This is the interactive path.
-- **Offline bake.** `time_stretch()` renders the whole clip at a chosen speed with
-  optional class-aware allocation. This powers the **"speed-baked"** export option:
-  ticking that checkbox on the Export card renders exports through the DSP at the
-  current playback speed.
+- **Streaming (real-time).** `StreamStretcher` renders the buffered audio in shortÂ blocks using the *same* hybrid engine used offline (`engines::hybrid`), with aÂ small look-behind so pitch marks and window ramps are fully established at everyÂ emit boundary and a short crossfade across each seam. At **1.0Ã— it is a direct**Â **passthrough** (no DSP at all), so plain-speed playback is bit-for-bit the sourceÂ and can never click or pop. This is the interactive path.
 
-Speed control lives under the waveform: drag the speed readout (e.g. `1.00×`) to
-the left/right to change it, click it to step up 0.25×, or double-click to reset
-to 1.0×. The range is **1.00×–4.00×**; there is no slow-down. The transport is a
-single button: play while stopped, stop while playing. Space does the same.
+- **Offline bake.** `time\_stretch()` renders the whole clip at a chosen speed withÂ optional class-aware allocation. This powers the **"speed-baked"** export option:Â ticking that checkbox on the Export card renders exports through the DSP at theÂ current playback speed.
 
-**Skip silence.** The `skip silence` toggle next to the speed readout skips anysilence longer than 0.25 s, leaving a 0.2 s pause split evenly across the two
-edges of the gap so the words it separates are not clipped. That pause is
-measured at 1.00x, so it shortens with the speed, but never below 0.1 s of output
-(0.1 s at 2.00x and at 4.00x). During playback the gap is removed in the audio
-feed itself, so the engine never restarts and the playhead stays put; in a
-speed-baked export the gaps are cut down and rendered out, and a `SkipBakedMap`
-keeps clip boundaries aligned with what was actually written. Pauses shorter than
-the threshold are kept as-is.
+Speed control lives under the waveform: drag the speed readout (e.g. `1.00Ã—`) toÂ the left/right to change it, click it to step up 0.25Ã—, or double-click to resetÂ to 1.0Ã—. The range is **1.00Ã—â€“4.00Ã—**; there is no slow-down. The transport is aÂ single button: play while stopped, stop while playing. Space does the same.
 
-**Clean up.** The `clean up` button opens a small options panel and a
-**Run clean-up** button; running it applies the selected stages to the recording
-before anything is stretched, because stretching exaggerates noise and breath,
-and then closes the panel. The stages are:
+**Skip silence.** The `skip silence` toggle next to the speed readout skips anysilence longer than 0.25 s, leaving a 0.2 s pause split evenly across the twoÂ edges of the gap so the words it separates are not clipped. That pause isÂ measured at 1.00x, so it shortens with the speed, but never below 0.1 s of outputÂ (0.1 s at 2.00x and at 4.00x). During playback the gap is removed in the audioÂ feed itself, so the engine never restarts and the playhead stays put; in aÂ speed-baked export the gaps are cut down and rendered out, and a `SkipBakedMap`Â keeps clip boundaries aligned with what was actually written. Pauses shorter thanÂ the threshold are kept as-is.
 
-- **rumble filter** — a 80 Hz high-pass that removes rumble, hum and handling
-  noise (on by default).
-- **denoise** — [RNNoise](https://gitlab.xiph.org/xiph/rnnoise) speech
-  denoising, run at 48 kHz in 10 ms frames and resampled back (on by default).
-  Loaded from the vendored build under `app/vendor/rnnoise/`; there is no CDN
-  fallback, so nothing can reach out.
-- **consonant boost** — a high-shelf above 2 kHz with a 0–6 dB strength control
-  plus light high-band compression, so soft consonants sit closer to the vowels.
-- **normalize** — sets the level, either to a −1 dBFS peak or to −20 dBFS RMS
-  (the mode selector beside it), and runs before the limiter so the limiter is
-  still the final guard.
-- **limit peaks** — a −1 dBFS peak limiter, also applied to speed-baked exports
-  after the DSP so a stretched render cannot clip.
+**Clean up.** The `clean up` button opens a small options panel and aÂ **Run clean-up** button; running it applies the selected stages to the recordingÂ before anything is stretched, because stretching exaggerates noise and breath,Â and then closes the panel. The stages are:
 
-**Ctrl+Z** steps back through edits and **Ctrl+Y** forward again (Cmd on macOS).
-When normalize is the only stage selected the run is a single multiplier, so it
-is stored as its gain — exact and free. Any other clean-up cannot be inverted, so
-it stores the previous samples, a full copy: those steps are only undoable for
-recordings under about three minutes, and the status line says when one was too
-long. Split edits are stored as the two lists, which costs nothing.
+- **rumble filter** â€” a 80 Hz high-pass that removes rumble, hum and handlingÂ noise (on by default).
+
+- **denoise** â€” [RNNoise](https://gitlab.xiph.org/xiph/rnnoise) speechÂ denoising, run at 48 kHz in 10 ms frames and resampled back (on by default).Â Loaded from the vendored build under `app/vendor/rnnoise/`; there is no CDNÂ fallback, so nothing can reach out.
+
+- **consonant boost** â€” a high-shelf above 2 kHz with a 0â€“6 dB strength controlÂ plus light high-band compression, so soft consonants sit closer to the vowels.
+
+- **normalize** â€” sets the level, either to a âˆ’1 dBFS peak or to âˆ’20 dBFS RMSÂ (the mode selector beside it), and runs before the limiter so the limiter isÂ still the final guard.
+
+- **limit peaks** â€” a âˆ’1 dBFS peak limiter, also applied to speed-baked exportsÂ after the DSP so a stretched render cannot clip.
+
+**Ctrl+Z** steps back through edits and **Ctrl+Y** forward again (Cmd on macOS).Â When normalize is the only stage selected the run is a single multiplier, so itÂ is stored as its gain â€” exact and free. Any other clean-up cannot be inverted, soÂ it stores the previous samples, a full copy: those steps are only undoable forÂ recordings under about three minutes, and the status line says when one was tooÂ long. Split edits are stored as the two lists, which costs nothing.
 
 ### Known limitations
 
-- **Class-aware allocation is approximated.** FastTalk's headline feature allocates
-  the speed budget per *phone class* using Montreal Forced Aligner output, which is
-  not available in a browser. This port uses energy-based silence/speech
-  segmentation (`rate::align_by_energy`) plus optional Whisper word boundaries. It
-  is FastTalk's own degraded `Class::SPEECH` path, not the MFA path.
+- **Class-aware allocation is approximated.** FastTalk's headline feature allocatesÂ the speed budget per *phone class* using Montreal Forced Aligner output, which isÂ not available in a browser. This port uses energy-based silence/speechÂ segmentation (`rate::align\_by\_energy`) plus optional Whisper word boundaries. ItÂ is FastTalk's own degraded `Class::SPEECH` path, not the MFA path.
+
 - Whisper weights are a one-time download, not bundled.
 
 ## Verifying
 
-```powershell
-cd core
-cargo test            # 65 tests: timing, pitch, PSOLA, WSOLA, streaming, rate,
-                      # step continuity, real-time throughput, skip-silence,
-                      # seam envelope, class-aware length, odd sample rates,
-                      # rumble/consonant/limiter stages
-node dsp_smoke.mjs    # WASM bindings end-to-end (needs: npx wasm-pack build --target nodejs)
-
-cd ..
-node --test app/test/*.test.mjs   # 57 JS unit tests: transcript formatting,
-                                  # filenames, split boundaries, dial and zoom
-                                  # arithmetic, WAV encoding, normalization,
-                                  # the clean-up chain and RNNoise
+```
+cd core  
+cargo test            \# 65 tests: timing, pitch, PSOLA, WSOLA, streaming, rate,  
+                      \# step continuity, real-time throughput, skip-silence,  
+                      \# seam envelope, class-aware length, odd sample rates,  
+                      \# rumble/consonant/limiter stages  
+node dsp\_smoke.mjs    \# WASM bindings end-to-end (needs: npx wasm-pack build --target nodejs)  
+  
+cd ..  
+node --test app/test/\*.test.mjs   \# 57 JS unit tests: transcript formatting,  
+                                  \# filenames, split boundaries, dial and zoom  
+                                  \# arithmetic, WAV encoding, normalization,  
+                                  \# the clean-up chain and RNNoise
 ```
 
-CI runs both suites (`.github/workflows/core-tests.yml`, `web-tests.yml`) plus a
-check that the vendored WASM is present before Pages deploys.
+CI runs both suites (`.github/workflows/core-tests.yml`, `web-tests.yml`) plus aÂ check that the vendored WASM is present before Pages deploys.
 
 ## Licensing
 
-This repository is distributed under the existing GPL-3.0 `LICENSE`. Its DSP
-methods follow published WSOLA/MWSOLA and TD-PSOLA formulations, including
-techniques from FastTalk's MIT-licensed implementation; those MIT-licensed
-methods remain compatible with GPL-3.0.
+This repository is distributed under the existing GPL-3.0 `LICENSE`. Its DSPÂ methods follow published WSOLA/MWSOLA and TD-PSOLA formulations, includingÂ techniques from FastTalk's MIT-licensed implementation; those MIT-licensedÂ methods remain compatible with GPL-3.0.
 
-The vendored RNNoise WebAssembly build (`app/vendor/rnnoise/`) is BSD-3-Clause
-(Mozilla / Xiph.Org / Jean-Marc Valin / Mark Borgerding), also compatible with
-GPL-3.0; see `app/vendor/rnnoise/COPYING`.
+The vendored RNNoise WebAssembly build (`app/vendor/rnnoise/`) is BSD-3-ClauseÂ (Mozilla / Xiph.Org / Jean-Marc Valin / Mark Borgerding), also compatible withÂ GPL-3.0; see `app/vendor/rnnoise/COPYING`.
 
 Other vendored third-party code, all compatible with GPL-3.0:
 
-- `app/vendor/lamejs/` — the MP3 encoder, LGPL-3.0.
-- `app/vendor/transformers/` — the transformers.js bundle (Apache-2.0) with
-  ONNX Runtime Web inlined (MIT).
-- `app/vendor/fasttalk-core/` — built from this repository's own `core/` crate.
+- `app/vendor/lamejs/` â€” the MP3 encoder, LGPL-3.0.
+
+- `app/vendor/transformers/` â€” the transformers.js bundle (Apache-2.0) withÂ ONNX Runtime Web inlined (MIT).
+
+- `app/vendor/fasttalk-core/` â€” built from this repository's own `core/` crate.
+
