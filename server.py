@@ -1,9 +1,9 @@
 #!/usr/bin/env python3
-"""Serve the RecordTranscriptSplit web app locally.
+"""Serve the RecordTrimTranscribe web app locally.
 
-This is the "website" delivery mode: everything (audio decode, DSP, transcription,
-export) runs in the browser; this server only hands over static files. It also
-serves the same files the portable Tauri build embeds.
+Everything (audio decode, DSP, transcription, export) runs in the browser; this
+server only hands over static files, which are the same files the Tauri desktop
+build embeds.
 
 Usage:
     python server.py [--port 8770] [--no-browser]
@@ -65,7 +65,7 @@ def main() -> int:
     handler = functools.partial(Handler, directory=str(APP_ROOT))
     server = http.server.ThreadingHTTPServer(("127.0.0.1", port), handler)
     url = f"http://127.0.0.1:{port}/"
-    print(f"RecordTranscriptSplit serving {APP_ROOT}")
+    print(f"RecordTrimTranscribe serving {APP_ROOT}")
     print(f"Open {url}  (Ctrl+C to stop)")
 
     if not args.no_browser:

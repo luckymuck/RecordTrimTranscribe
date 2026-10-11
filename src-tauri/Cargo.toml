@@ -1,7 +1,7 @@
 [package]
-name = "record-transcript-split"
+name = "record-trim-transcribe"
 version = "0.1.0"
-description = "Portable desktop shell for the RecordTranscriptSplit web app"
+description = "Desktop shell for the RecordTrimTranscribe web app"
 edition = "2021"
 
 [build-dependencies]
