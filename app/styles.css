@@ -59,7 +59,10 @@ main { max-width: 960px; margin: 0 auto; padding: 0.8rem 1rem 1.4rem; display: f
   .wave-controls { flex-wrap: wrap; overflow-x: visible; }
 }
 .sm-select { padding: 0.26rem 0.4rem; font-size: 0.78rem; }
-/* Clean-up options: a compact row revealed by the options button. */
+/* A class rule that sets `display` beats the `hidden` attribute, which is only a
+   UA style -- that is why `.row` panels ignored `hidden` and stayed visible. */
+[hidden] { display: none !important; }
+/* Clean-up options: a compact row revealed by the clean up button. */
 .clean-options { padding: 0.35rem 0; border-top: 1px dashed var(--line); }
 .clean-options input[type="range"] { width: 90px; accent-color: var(--accent2); }
 .clean-options input[type="range"]:disabled { opacity: 0.5; }
