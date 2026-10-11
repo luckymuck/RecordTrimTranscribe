@@ -48,22 +48,56 @@ fn frame_rms_f32(x: &[f32], frame: usize, hop: usize) -> Vec<f64> {
         .collect()
 }
 
+/// Frames of hangover that keep a run labelled speech after it drops quiet.
+/// The analysis hop is 10 ms in both callers, so this is about 100 ms.
+const HANGOVER_FRAMES: usize = 10;
+
 /// Classify frame energies into contiguous speech/silence runs.
 ///
-/// Each run is `(start_sample, end_sample, is_speech)`. The threshold is the
-/// 10th-percentile noise floor plus 8% of the peak-to-floor range, which adapts
-/// to a recording's own level rather than assuming an absolute one.
+/// Each run is `(start_sample, end_sample, is_speech)`.
+///
+/// The decision is made in decibels against a high percentile rather than the
+/// single loudest frame. Anchoring to the peak meant one cough or plosive could
+/// raise the threshold far above soft speech, so trailing words and fricatives
+/// counted as silence and skip-silence then cut them. Hysteresis (separate
+/// enter/exit levels) plus a hangover keep brief dips inside a word from
+/// fragmenting it.
 fn energy_runs(x_len: usize, rms: &[f64], hop: usize, frame: usize) -> Vec<(i64, i64, bool)> {
     if rms.is_empty() {
         return Vec::new();
     }
-    let mut sorted = rms.to_vec();
+    let db: Vec<f64> = rms
+        .iter()
+        .map(|v| 20.0 * v.max(1e-9).log10())
+        .collect();
+    let mut sorted = db.clone();
     sorted.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
-    let peak = sorted[sorted.len() - 1];
     let floor = sorted[sorted.len() / 10];
-    let threshold = (floor + 0.08 * (peak - floor)).max(1e-4);
+    let speech_level = sorted[(sorted.len() * 90) / 100];
+    let span = (speech_level - floor).max(1e-6);
+    let enter = floor + 0.35 * span;
+    let exit = floor + 0.20 * span;
 
-    let speech: Vec<bool> = rms.iter().map(|v| *v > threshold).collect();
+    let mut speech = vec![false; db.len()];
+    let mut in_speech = false;
+    let mut quiet_run = 0usize;
+    for (i, level) in db.iter().enumerate() {
+        let limit = if in_speech { exit } else { enter };
+        if *level > limit {
+            in_speech = true;
+            quiet_run = 0;
+            speech[i] = true;
+        } else if in_speech {
+            quiet_run += 1;
+            if quiet_run <= HANGOVER_FRAMES {
+                speech[i] = true;
+            } else {
+                in_speech = false;
+                quiet_run = 0;
+            }
+        }
+    }
+
     let mut runs = Vec::new();
     let mut start_frame = 0usize;
     let mut current = speech[0];
@@ -135,30 +169,26 @@ pub fn align_by_energy(x: &[f64], sr: u32) -> Vec<Segment> {
 /// ...]` sample positions.
 ///
 /// This is the playback-side counterpart of [`align_by_energy`]: it works on the
-/// `f32` samples directly and returns only the zones to skip, so the caller never
+/// `f32` samples directly and returns only the runs to skip, so the caller never
 /// holds a full-length `f64` copy or the segment list.
 ///
-/// Each zone is trimmed by `keep_s`, split evenly between its start and its end,
-/// so a beat of silence survives on both sides. A boundary that lands a hair
-/// early or late can then no longer clip the words it separates.
-pub fn silence_zones_f32(x: &[f32], sr: u32, min_silence_s: f64, keep_s: f64) -> Vec<f64> {
+/// The boundaries are the raw detected silence edges. How much silence to keep
+/// on each side is a function of playback speed, so the caller applies that
+/// inset (see `skipKeepSourceSeconds` in the client) rather than baking it in
+/// here and forcing a re-scan on every speed change.
+pub fn silence_zones_f32(x: &[f32], sr: u32, min_silence_s: f64) -> Vec<f64> {
     let frame = ((0.020 * sr as f64) as usize).max(2);
     let hop = ((0.010 * sr as f64) as usize).max(1);
     let rms = frame_rms_f32(x, frame, hop);
     let runs = energy_runs(x.len(), &rms, hop, frame);
     let min_len = min_silence_s * sr as f64;
-    let half = (keep_s * sr as f64).max(0.0) / 2.0;
     let mut zones = Vec::new();
     for (start, end, speech) in runs {
         if speech || (end - start) as f64 <= min_len {
             continue;
         }
-        let skip_start = (start as f64 + half).min(end as f64);
-        let skip_end = (end as f64 - half).max(start as f64);
-        if skip_end > skip_start {
-            zones.push(skip_start);
-            zones.push(skip_end);
-        }
+        zones.push(start as f64);
+        zones.push(end as f64);
     }
     zones
 }

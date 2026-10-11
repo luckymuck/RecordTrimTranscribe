@@ -14,7 +14,7 @@
 import { audioContext } from "./audio/decode.js";
 import { StreamStretcher, timeStretch } from "./core/dsp.js";
 
-const LOOKAHEAD = 1.5; // seconds of output to keep scheduled ahead
+const LOOKAHEAD = 0.5; // seconds of output to keep scheduled ahead
 const OUT_CHUNK = 0.2; // seconds of output per rendered buffer
 // Never start a buffer closer than this to "now". If the main thread stalls
 // long enough to let the graph drain, the schedule is pushed forward to here so
@@ -35,6 +35,10 @@ export class Player {
     this.playing = false;
     this.sources = [];
     this.timer = null;
+    // Deferred "playback ended" timer, and a token so a stale one cannot fire
+    // after the user has started playback again.
+    this.endTimer = null;
+    this.generation = 0;
     this.stretcher = null;
     // Source-domain read cursor for feeding the engine (kept samples only).
     this.srcRead = 0;
@@ -49,6 +53,11 @@ export class Player {
     this.gaps = []; // sorted, non-overlapping {start, end} in source samples
     this._feed = new Float32Array(0);
     this._joinRamp = 240; // samples used to ease a closed gap (5 ms at 48 kHz)
+    // Output-time -> kept-position map, one entry per scheduled chunk. The
+    // playhead is read from this instead of wall-clock * speed, so a speed
+    // change cannot leave it ahead of or behind the audio actually heard.
+    this.posLog = [];
+    this.keptConsumed = 0;
   }
 
   setSource(pcm, sampleRate) {
@@ -104,6 +113,8 @@ export class Player {
     this.srcRead = from;
     this.srcStart = this.sourceToKept(from);
     this.finished = false;
+    this.posLog = [];
+    this.keptConsumed = this.srcStart;
     this.scheduleTime = this.ctx.currentTime + 0.08;
     this.timeStart = this.scheduleTime;
     this.playing = true;
@@ -111,16 +122,15 @@ export class Player {
     this.timer = setInterval(() => this._tick(), 50);
   }
 
+  /**
+   * Change the playback speed. The playhead is not re-based here: it comes from
+   * the render log, which already knows what was rendered at which speed.
+   */
   setSpeed(speed) {
     this.requestedSpeed = speed;
+    this.activeSpeed = speed;
     if (this.playing && this.stretcher) {
-      const now = this.ctx.currentTime;
-      const elapsed = Math.max(0, now - this.timeStart);
-      const played = this.srcStart + elapsed * this.sr * this.activeSpeed;
       this.stretcher.set_speed(speed);
-      this.srcStart = played;
-      this.timeStart = now;
-      this.activeSpeed = speed;
     }
   }
 
@@ -199,25 +209,29 @@ export class Player {
     const inputEnd = this.pcm.length;
     while (filled < outSamples && guard < 500) {
       guard++;
-      if (this.srcRead >= inputEnd) {
+      const have = this.stretcher.available_output();
+      const needed = outSamples - filled;
+      if (have < needed && this.srcRead < inputEnd) {
+        // Push only what is needed (plus a small margin). Pushing a fixed
+        // surplus every chunk used to pile rendered audio up in the engine,
+        // which delayed speed changes by the whole backlog.
+        const want = Math.ceil((needed - have) * this.requestedSpeed) + 2048;
+        const chunk = this._readKept(want);
+        if (chunk.length === 0) break;
+        this.stretcher.push(chunk);
+      } else if (this.srcRead >= inputEnd) {
         // The engine finalizes a held seam only when signaled, so tell it once
         // that the whole source has been pushed.
         this.stretcher.finish();
         this.finished = true;
-        const got = this.stretcher.pull(outSamples - filled);
-        if (got.length === 0) break;
+      }
+      const got = this.stretcher.pull(needed);
+      if (got.length > 0) {
         out.set(got, filled);
         filled += got.length;
-        continue;
+      } else if (this.srcRead >= inputEnd || have >= needed) {
+        break;
       }
-      const want = Math.ceil(outSamples * this.requestedSpeed) + 8192;
-      const chunk = this._readKept(want);
-      if (chunk.length === 0) break;
-      this.stretcher.push(chunk);
-      const got = this.stretcher.pull(outSamples - filled);
-      out.set(got, filled);
-      filled += got.length;
-      if (got.length === 0) break;
     }
     return filled > 0 ? out.subarray(0, filled) : null;
   }
@@ -251,15 +265,55 @@ export class Player {
       };
       node.start(this.scheduleTime);
       this.sources.push(node);
+      // Record what this chunk is and where it lands, at the speed it was
+      // rendered with.
+      const k0 = this.keptConsumed;
+      const k1 = k0 + chunk.length * this.activeSpeed;
+      this.posLog.push({
+        t0: this.scheduleTime,
+        k0,
+        t1: this.scheduleTime + chunk.length / this.sr,
+        k1,
+      });
+      this.keptConsumed = k1;
       this.scheduleTime += chunk.length / this.sr;
+    }
+    // Drop log entries well behind the playhead.
+    while (this.posLog.length > 1 && this.posLog[0].t1 < now - 2) {
+      this.posLog.shift();
     }
     this.onPosition(this._position(this.ctx.currentTime));
   }
 
-  /** Source-domain playhead position at audio time `now`. */
+  /** Source-domain playhead position at audio time `now`, from the render log. */
   _position(now) {
-    const elapsed = Math.max(0, now - this.timeStart);
-    const kept = this.srcStart + elapsed * this.sr * this.activeSpeed;
+    const log = this.posLog;
+    if (!log || log.length === 0) {
+      return Math.min(this.pcm.length, this.keptToSource(this.srcStart));
+    }
+    let lo = 0;
+    let hi = log.length - 1;
+    let found = -1;
+    while (lo <= hi) {
+      const mid = (lo + hi) >> 1;
+      if (log[mid].t0 <= now) {
+        found = mid;
+        lo = mid + 1;
+      } else {
+        hi = mid - 1;
+      }
+    }
+    let kept;
+    if (found < 0) {
+      kept = log[0].k0;
+    } else {
+      const e = log[found];
+      if (now >= e.t1) {
+        kept = found === log.length - 1 ? e.k1 : log[found + 1].k0;
+      } else {
+        kept = e.k0 + ((now - e.t0) / (e.t1 - e.t0)) * (e.k1 - e.k0);
+      }
+    }
     return Math.min(this.pcm.length, this.keptToSource(kept));
   }
 
@@ -270,15 +324,30 @@ export class Player {
       clearInterval(this.timer);
       this.timer = null;
     }
+    const generation = this.generation;
     const remaining = Math.max(0, (this.scheduleTime - this.ctx.currentTime) * 1000);
-    setTimeout(() => {
+    this._clearEndTimer();
+    this.endTimer = setTimeout(() => {
+      this.endTimer = null;
+      // Playback may have been restarted since; a stale timer must not reset
+      // the transport under a running session.
+      if (generation !== this.generation) return;
       this.onPosition(this.pcm.length);
       this.onEnd();
     }, remaining + 30);
   }
 
+  _clearEndTimer() {
+    if (this.endTimer !== null) {
+      clearTimeout(this.endTimer);
+      this.endTimer = null;
+    }
+  }
+
   stop() {
     this.playing = false;
+    this.generation += 1;
+    this._clearEndTimer();
     if (this.timer) {
       clearInterval(this.timer);
       this.timer = null;
@@ -293,6 +362,7 @@ export class Player {
     }
     this.sources = [];
     this.stretcher = null;
+    this.posLog = [];
   }
 
   /** Offline render of the whole clip at `speed` (faithful hybrid engine). */

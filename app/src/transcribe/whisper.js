@@ -1,6 +1,6 @@
 // On-device transcription with Whisper via transformers.js (WASM/WebGPU).
 import { pipeline, env } from "@huggingface/transformers";
-import { resample } from "../audio/decode.js";
+import { resampleHQ } from "../audio/decode.js";
 
 env.allowLocalModels = false;
 
@@ -143,7 +143,7 @@ export async function transcribe(pcm, sampleRate, modelId, { onProgress, onStatu
   onStatus && onStatus("Loading model…");
   const pipe = await getPipeline(modelId, onProgress);
   onStatus && onStatus("Transcribing… 0%");
-  const pcm16k = resample(pcm, sampleRate, 16000);
+  const pcm16k = await resampleHQ(pcm, sampleRate, 16000);
   const windows = splitTranscriptionWindows(pcm16k, 16000);
   const totalSeconds = pcm16k.length / 16000;
 

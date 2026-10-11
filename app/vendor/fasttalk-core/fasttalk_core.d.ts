@@ -71,12 +71,13 @@ export function analyze(samples: Float32Array, sample_rate: number): string;
 
 /**
  * Silence runs longer than `min_silence_s`, as flat `[start, end, ...]` sample
- * positions. Each zone is trimmed by `keep_s` at its end.
+ * positions. Boundaries are the raw detected silence edges; the caller insets
+ * them by the speed-dependent keep.
  *
  * Runs on the `f32` samples directly so enabling skip-silence on a long
  * recording never materialises a full-length `f64` copy.
  */
-export function silence_zones(samples: Float32Array, sample_rate: number, min_silence_s: number, keep_s: number): Float64Array;
+export function silence_zones(samples: Float32Array, sample_rate: number, min_silence_s: number): Float64Array;
 
 /**
  * Offline time-scale modification of a mono clip.
@@ -111,7 +112,7 @@ export interface InitOutput {
     readonly analyze: (a: number, b: number, c: number) => [number, number];
     readonly bakedmap_map_position: (a: number, b: number) => number;
     readonly bakedmap_new: (a: number, b: number, c: number, d: number, e: number) => number;
-    readonly silence_zones: (a: number, b: number, c: number, d: number, e: number) => [number, number];
+    readonly silence_zones: (a: number, b: number, c: number, d: number) => [number, number];
     readonly skipbakedmap_map_position: (a: number, b: number) => number;
     readonly skipbakedmap_new: (a: number, b: number, c: number, d: number, e: number, f: number, g: number) => number;
     readonly streamstretcher_available_output: (a: number) => number;

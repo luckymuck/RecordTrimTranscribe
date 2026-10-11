@@ -44,3 +44,28 @@ export function resample(pcm, fromRate, toRate) {
   }
   return out;
 }
+
+/**
+ * Band-limited resample using the browser's own resampler.
+ *
+ * The linear `resample` above degenerates to plain decimation whenever the rate
+ * ratio is a whole number: at 48 -> 16 kHz the interpolation weight is always 0,
+ * so every third sample is taken with no low-pass. Everything from 8-24 kHz then
+ * aliases back into the 0-8 kHz band Whisper reads, adding noise on consonants.
+ * This uses `OfflineAudioContext`, which applies a proper anti-alias filter.
+ */
+export async function resampleHQ(pcm, fromRate, toRate) {
+  if (fromRate === toRate) return pcm;
+  const OfflineCtx = window.OfflineAudioContext || window.webkitOfflineAudioContext;
+  if (!OfflineCtx || pcm.length === 0) return resample(pcm, fromRate, toRate);
+  const length = Math.max(1, Math.ceil((pcm.length * toRate) / fromRate));
+  const off = new OfflineCtx(1, length, toRate);
+  const buffer = off.createBuffer(1, pcm.length, fromRate);
+  buffer.copyToChannel(pcm, 0);
+  const src = off.createBufferSource();
+  src.buffer = buffer;
+  src.connect(off.destination);
+  src.start();
+  const rendered = await off.startRendering();
+  return rendered.getChannelData(0);
+}

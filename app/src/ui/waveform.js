@@ -444,7 +444,8 @@ export class WaveformView {
         const s = Math.max(0, Math.min(this.pcm.length, this.xToSample(x)));
         this.splits[this._dragging.index] = Math.round(s);
         this.splits.sort((a, b) => a - b);
-        this.onSplitsChange(this.splits);
+        // `true` = mid-drag: the listener should do only the cheap label update.
+        this.onSplitsChange(this.splits, true);
         this.draw();
       } else {
         const dSamples = ((x - this._dragging.x) / main.clientWidth) * this.viewLen;
@@ -455,6 +456,7 @@ export class WaveformView {
     });
 
     main.addEventListener("pointerup", (e) => {
+      const finishedSplit = this._dragging && this._dragging.type === "split";
       if (this._dragging && this._dragging.type === "scroll") {
         const moved = Math.abs(e.clientX - this.main.getBoundingClientRect().left - this._dragging.x);
         if (moved < 3) {
@@ -464,6 +466,8 @@ export class WaveformView {
         }
       }
       this._dragging = null;
+      // Drag over: now the expensive recomputes (clip list, scopes) are safe.
+      if (finishedSplit) this.onSplitsChange(this.splits, false);
       this.onViewChange(this._zoomLabel());
     });
 

@@ -1,9 +1,16 @@
-// Last-session autosave in IndexedDB so a recording survives accidental
-// browser-back, refresh, or an app close before the user exported it.
+// Session autosave in IndexedDB so work survives an accidental close.
+//
+// A session is a meta record plus an ordered list of audio chunks. A live
+// recording appends chunks as they arrive, so a crash mid-recording loses at
+// most the last chunk; a snapshot (a processed edit) replaces the chunks with a
+// single WAV. Keys are prefixed so one session's chunks can be ranged-loaded in
+// order, and so several sessions can coexist instead of overwriting each other.
 
 const DB_NAME = "rts-session";
 const STORE = "session";
-const KEY = "autosave";
+const META_PREFIX = "meta:";
+const CHUNK_PREFIX = "chunk:";
+const RANGE_END = "\uffff";
 
 function openDB() {
   return new Promise((resolve, reject) => {
@@ -15,41 +22,93 @@ function openDB() {
     };
     rq.onsuccess = (e) => resolve(e.target.result);
     rq.onerror = (e) => reject(e.target.error || new Error("IndexedDB open failed"));
+    rq.onblocked = () => reject(new Error("IndexedDB open blocked"));
   });
 }
 
-/** Persist the current clip as a WAV blob so it can be recovered next launch. */
-export async function saveAutosave(record) {
-  const db = await openDB();
+function write(db, work) {
   return new Promise((resolve, reject) => {
-    const tx = db.transaction(STORE, "readwrite");
-    tx.objectStore(STORE).put(record, KEY);
-    tx.oncomplete = resolve;
-    tx.onerror = () => reject(tx.error);
+    const t = db.transaction(STORE, "readwrite");
+    try {
+      work(t.objectStore(STORE));
+    } catch (err) {
+      reject(err);
+      return;
+    }
+    t.oncomplete = () => resolve();
+    t.onerror = () => reject(t.error || new Error("IndexedDB write failed"));
+    t.onabort = () => reject(t.error || new Error("IndexedDB write aborted"));
   });
 }
 
-export async function loadAutosave() {
-  const db = await openDB();
+function read(db, work) {
   return new Promise((resolve, reject) => {
-    const tx = db.transaction(STORE, "readonly");
-    const rq = tx.objectStore(STORE).get(KEY);
-    rq.onsuccess = () => resolve(rq.result || null);
+    const t = db.transaction(STORE, "readonly");
+    const rq = work(t.objectStore(STORE));
+    rq.onsuccess = () => resolve(rq.result);
     rq.onerror = () => reject(rq.error);
+    t.onabort = () => reject(t.error || new Error("IndexedDB read aborted"));
   });
 }
 
-export async function clearAutosave() {
-  const db = await openDB();
-  return new Promise((resolve, reject) => {
-    const tx = db.transaction(STORE, "readwrite");
-    tx.objectStore(STORE).delete(KEY);
-    tx.oncomplete = resolve;
-    tx.onerror = () => reject(tx.error);
-  });
-}
+const metaKey = (id) => META_PREFIX + id;
+const chunkKey = (id, index) => `${CHUNK_PREFIX}${id}:${String(index).padStart(8, "0")}`;
+const chunkRange = (id) =>
+  IDBKeyRange.bound(`${CHUNK_PREFIX}${id}:`, `${CHUNK_PREFIX}${id}:${RANGE_END}`);
+const metaRange = () => IDBKeyRange.bound(META_PREFIX, META_PREFIX + RANGE_END);
 
 /** Whether the browser can persist (basically always true in a secure context). */
 export function storageAvailable() {
   return !!window.indexedDB && !!window.isSecureContext;
+}
+
+/** Create or update a session's metadata record. */
+export async function createSession(id, meta) {
+  const db = await openDB();
+  await write(db, (s) => s.put({ ...meta, id, savedAt: Date.now() }, metaKey(id)));
+}
+
+/** Append one captured chunk. `arrayBuffer` avoids the Safari Blob pitfall. */
+export async function appendChunk(id, index, arrayBuffer) {
+  const db = await openDB();
+  await write(db, (s) => {
+    s.put(arrayBuffer, chunkKey(id, index));
+    s.put({ id, savedAt: Date.now() }, metaKey(id));
+  });
+}
+
+/** Replace a session's audio with a single snapshot (a processed edit). */
+export async function replaceSnapshot(id, meta, arrayBuffer) {
+  const db = await openDB();
+  await write(db, (s) => {
+    s.delete(chunkRange(id));
+    s.put(arrayBuffer, chunkKey(id, 0));
+    s.put({ ...meta, id, savedAt: Date.now() }, metaKey(id));
+  });
+}
+
+/** All session metadata, newest first. */
+export async function listSessions() {
+  const db = await openDB();
+  const metas = await read(db, (s) => s.getAll(metaRange()));
+  return (metas || []).sort((a, b) => (b.savedAt || 0) - (a.savedAt || 0));
+}
+
+/** Load one session as `{ meta, blob }`, or null. */
+export async function loadSession(id) {
+  const db = await openDB();
+  const meta = await read(db, (s) => s.get(metaKey(id)));
+  if (!meta) return null;
+  const chunks = await read(db, (s) => s.getAll(chunkRange(id)));
+  if (!chunks || chunks.length === 0) return null;
+  const blob = new Blob(chunks, { type: meta.type || "audio/webm" });
+  return { meta, blob };
+}
+
+export async function deleteSession(id) {
+  const db = await openDB();
+  await write(db, (s) => {
+    s.delete(metaKey(id));
+    s.delete(chunkRange(id));
+  });
 }

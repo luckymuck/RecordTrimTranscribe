@@ -3,7 +3,7 @@ import { initDsp, getDspVersion, makeBakedMap, makeSkipBakedMap, timeStretchSkip
 import { decodeAudioBlob, audioContext } from "./audio/decode.js";
 import { Recorder } from "./audio/record.js";
 import { encode, encodeWav } from "./audio/encode.js";
-import { saveAutosave, loadAutosave, clearAutosave, storageAvailable } from "./storage.js";
+import { appendChunk, createSession, deleteSession, listSessions, loadSession, replaceSnapshot, storageAvailable } from "./storage.js";
 import { WaveformView } from "./ui/waveform.js";
 import { Player } from "./playback.js";
 import { transcribe, toSrt } from "./transcribe/whisper.js";
@@ -21,7 +21,15 @@ const state = {
   outputDeviceId: null,
   sourceName: "",
   saved: true,
+  // IndexedDB session this source autosaves into. A fresh id per source means a
+  // new recording never overwrites an unrecovered one.
+  sessionId: null,
 };
+
+/** A short unique id for an autosave session. */
+function newSessionId() {
+  return Date.now().toString(36) + "-" + Math.random().toString(36).slice(2, 8);
+}
 
 const recorder = new Recorder();
 let recTimer = null;
@@ -79,9 +87,16 @@ const waveform = new WaveformView({
     $("cursorTime").textContent = fmt(sample);
     if (player.playing) player.play(sample, currentSpeed());
   },
-  onSplitsChange: (splits) => {
+  onSplitsChange: (splits, dragging) => {
     state.splits = splits.slice();
     $("splitInfo").textContent = `${splits.length} splits`;
+    if (dragging) {
+      // Mid-drag: labels only. Rebuilding the clip list (a whole-file export
+      // map when baked) and the transcript scopes on every pointermove is what
+      // made dragging heavy.
+      updateSplitLabels();
+      return;
+    }
     renderClipList();
     updateSplitLabels();
     renderTranscriptScopes();
@@ -133,28 +148,64 @@ let speedValue = 1.0;
 // export. A short pause is left in its place so the next word stays easy to
 // pick up. That pause is source time at 1.00x; it shortens with the speed.
 const SKIP_MIN_S = 0.25;
+// Kept pause in source seconds at 1.00x; it shortens with the speed until it
+// reaches SKIP_KEEP_FLOOR_S of output, then stops shrinking so adjacent words
+// cannot fuse.
 const SKIP_KEEP_S = 0.2;
+const SKIP_KEEP_FLOOR_S = 0.1;
 let skipSilence = false;
-let silenceZoneCache = null;
+// Raw detected silence runs, speed-independent. The speed-dependent inset is
+// applied when the gap map is built, so changing speed never re-scans.
+let silenceRunCache = null;
 
 function currentSpeed() {
   return speedValue;
 }
 
-function setSpeedUI(s) {
+/** Source seconds of silence kept on each side of a gap at `speed`. */
+function skipKeepSourceSeconds(speed = speedValue) {
+  return Math.max(SKIP_KEEP_S, SKIP_KEEP_FLOOR_S * speed);
+}
+
+function setSpeedUI(s, rebase = true) {
   speedValue = Math.round(Math.min(SPEED_MAX, Math.max(SPEED_MIN, s)) * 100) / 100;
   $("speed").textContent = speedValue.toFixed(2) + "×";
   $("speed").setAttribute("aria-valuenow", speedValue.toFixed(2));
   player.setSpeed(speedValue);
+  // The kept pause scales with speed, so the gap map changes too. During a dial
+  // drag this is deferred to pointerup to keep the drag smooth.
+  if (rebase && skipSilence) rebaseSkipSilence();
 }
 
-/** Silence zones in input samples, computed once per loaded recording. */
-function getSilenceZones() {
+/** Re-apply the skip map and restart at the playhead so the cursor stays put. */
+function rebaseSkipSilence() {
+  const wasPlaying = player.playing;
+  const pos = state.cursorSample;
+  applySkipSilence();
+  if (wasPlaying) player.play(pos, currentSpeed());
+}
+
+/** Raw silence runs `[{start, end}]`, computed once per loaded recording. */
+function getSilenceRuns() {
   if (!state.pcm) return [];
-  if (!silenceZoneCache) {
-    silenceZoneCache = silenceZones(state.pcm, state.sampleRate, SKIP_MIN_S, SKIP_KEEP_S);
+  if (!silenceRunCache) {
+    silenceRunCache = silenceZones(state.pcm, state.sampleRate, SKIP_MIN_S);
   }
-  return silenceZoneCache;
+  return silenceRunCache;
+}
+
+/** Gap interiors to skip at the current speed, in input samples. */
+function getSilenceZones() {
+  const runs = getSilenceRuns();
+  if (!runs.length) return [];
+  const half = (skipKeepSourceSeconds() * state.sampleRate) / 2;
+  const zones = [];
+  for (const run of runs) {
+    const start = Math.round(run.start + half);
+    const end = Math.round(run.end - half);
+    if (end > start) zones.push({ start, end });
+  }
+  return zones;
 }
 
 /** Apply the current skip-silence setting to the live player. */
@@ -171,7 +222,7 @@ function setSkipSilence(on) {
     // Let the status paint before the (synchronous) energy scan runs.
     setTimeout(() => {
       try {
-        applySkipSilence();
+        rebaseSkipSilence();
         const zones = getSilenceZones().length;
         $("saveStatus").textContent = zones
           ? `Skipping ${zones} silence gap${zones === 1 ? "" : "s"} over ${SKIP_MIN_S}s`
@@ -185,7 +236,7 @@ function setSkipSilence(on) {
       refreshClipDurations();
     }, 0);
   } else {
-    applySkipSilence();
+    rebaseSkipSilence();
     refreshClipDurations();
   }
 }
@@ -202,6 +253,12 @@ function fmtShort(sample) {
 function markSaved() {
   state.saved = true;
   $("saveStatus").textContent = "saved ✓";
+  // An explicit save clears this source's recovery slot, so the banner stops
+  // reappearing on every launch.
+  if (state.sessionId) {
+    const id = state.sessionId;
+    deleteSession(id).catch(() => {});
+  }
 }
 
 function markUnsaved() {
@@ -209,19 +266,25 @@ function markUnsaved() {
   $("saveStatus").textContent = "unsaved ⚠";
 }
 
-/** Keep a copy of the current clip in IndexedDB so it survives a page close. */
+/** Snapshot the current clip into IndexedDB so it survives a page close. */
 async function persistAutosave() {
-  if (!state.pcm) return;
+  if (!state.pcm || !storageAvailable()) return;
+  if (!state.sessionId) state.sessionId = newSessionId();
   try {
     const blob = encodeWav(state.pcm, state.sampleRate);
-    await saveAutosave({
-      name: state.sourceName || "recording",
-      sampleRate: state.sampleRate,
-      blob,
-      savedAt: Date.now(),
-    });
+    const buffer = await blob.arrayBuffer();
+    await replaceSnapshot(
+      state.sessionId,
+      {
+        name: state.sourceName || "recording",
+        sampleRate: state.sampleRate,
+        type: "audio/wav",
+      },
+      buffer
+    );
   } catch (e) {
-    /* storage unavailable or full; non-fatal */
+    // Storage unavailable or full: say so rather than claiming protection.
+    $("saveStatus").textContent = "unsaved ⚠ (autosave failed)";
   }
 }
 
@@ -241,21 +304,25 @@ function enableCards(enabled) {
   }
 }
 
-function setSource(pcm, sampleRate, label) {
+function setSource(pcm, sampleRate, label, { autosave = true, saved = false, sessionId = null } = {}) {
   state.pcm = pcm;
   state.sampleRate = sampleRate;
   state.transcript = null;
   state.splits = [];
   state.sourceName = label || "recording";
+  state.sessionId = sessionId || newSessionId();
   waveform.setData(pcm, sampleRate);
   player.setSource(pcm, sampleRate);
-  silenceZoneCache = null;
+  silenceRunCache = null;
   clearRenderCache();
   applySkipSilence();
   $("fileMeta").textContent = `${label} · ${(pcm.length / sampleRate).toFixed(1)}s @ ${sampleRate} Hz`;
   enableCards(true);
-  markUnsaved();
-  persistAutosave();
+  if (saved) markSaved();
+  else markUnsaved();
+  // A file already on disk needs no IndexedDB copy; a finished recording is
+  // already persisted chunk-by-chunk, so it needs no snapshot either.
+  if (autosave) persistAutosave();
   renderClipList();
   updateSplitLabels();
   $("transcript").innerHTML = "";
@@ -364,15 +431,37 @@ $("devOutput").addEventListener("change", async (e) => {
 });
 
 // ── Split labels (time + number + optional transcript words) ────────────────
-function transcriptWordsForClip(startSample) {
+// The transcript chunks are sorted once and reused; sorting the whole list for
+// every split on every redraw was the other half of the drag cost.
+let sortedChunksCache = { src: null, list: [] };
+
+function sortedTranscriptChunks() {
   const tx = state.transcript;
-  if (!tx || !tx.chunks || !state.pcm) return "";
-  const sorted = tx.chunks
-    .filter((c) => Array.isArray(c.timestamp) && c.timestamp[0] * state.sampleRate >= startSample)
-    .sort((a, b) => a.timestamp[0] - b.timestamp[0])
-    .slice(0, 4)
-    .map((w) => w.text.trim());
-  const text = sorted.join(" ").trim();
+  if (!tx || !tx.chunks) return [];
+  if (sortedChunksCache.src === tx.chunks) return sortedChunksCache.list;
+  const list = tx.chunks
+    .filter((c) => Array.isArray(c.timestamp))
+    .sort((a, b) => a.timestamp[0] - b.timestamp[0]);
+  sortedChunksCache = { src: tx.chunks, list };
+  return list;
+}
+
+function transcriptWordsForClip(startSample) {
+  const list = sortedTranscriptChunks();
+  if (!list.length || !state.pcm) return "";
+  const startSeconds = startSample / state.sampleRate;
+  let lo = 0;
+  let hi = list.length;
+  while (lo < hi) {
+    const mid = (lo + hi) >> 1;
+    if (list[mid].timestamp[0] < startSeconds) lo = mid + 1;
+    else hi = mid;
+  }
+  const text = list
+    .slice(lo, lo + 4)
+    .map((w) => w.text.trim())
+    .join(" ")
+    .trim();
   return text ? "-" + text : "";
 }
 
@@ -424,10 +513,22 @@ $("recordBtn").addEventListener("click", async () => {
   if (player.playing) player.stop();
   setRecordingUi(true);
   $("recordBtn").disabled = true; // guard against double-click while opening the mic
+  // Persist chunks as they arrive so a crash mid-recording is recoverable.
+  const sessionId = newSessionId();
+  state.sessionId = sessionId;
+  recorder.onChunk = (buffer, index) => {
+    appendChunk(sessionId, index, buffer).catch(() => {});
+  };
   try {
     await recorder.start((level) => {
       $("meterFill").style.width = Math.min(100, level * 140) + "%";
     }, state.inputDeviceId);
+    createSession(sessionId, {
+      name: recordingName(),
+      sampleRate: audioContext().sampleRate,
+      type: "audio/webm",
+      live: true,
+    }).catch(() => {});
     refreshDevices(); // device labels are exposed once we have mic permission
     $("recordBtn").disabled = false;
     $("recordBtn").textContent = "⏸ Pause";
@@ -449,6 +550,8 @@ $("stopRecBtn").addEventListener("click", async () => {
   $("recordBtn").classList.remove("recording", "paused");
   $("stopRecBtn").disabled = true;
   $("meterFill").style.width = "0%";
+  const sessionId = state.sessionId;
+  recorder.onChunk = null;
   let decoded = null;
   try {
     decoded = await withBusy("Finishing recording…", () => recorder.stop());
@@ -458,7 +561,13 @@ $("stopRecBtn").addEventListener("click", async () => {
     return;
   }
   setRecordingUi(false);
-  if (decoded) setSource(decoded.pcm, decoded.sampleRate, recordingName());
+  if (decoded) {
+    // The live chunks are already the recovery copy; no snapshot needed.
+    setSource(decoded.pcm, decoded.sampleRate, recordingName(), {
+      autosave: false,
+      sessionId,
+    });
+  }
 });
 
 // ── Load file ─────────────────────────────────────────────────────────────────
@@ -476,7 +585,8 @@ $("fileInput").addEventListener("change", async (e) => {
   try {
     await withBusy(`Loading ${file.name}…`, async () => {
       const d = await decodeAudioBlob(file);
-      setSource(d.pcm, d.sampleRate, file.name);
+      // The file is already on disk: no IndexedDB copy, and not "unsaved".
+      setSource(d.pcm, d.sampleRate, file.name, { autosave: false, saved: true });
     });
   } catch (err) {
     alert("Could not decode file: " + err.message);
@@ -528,7 +638,7 @@ $("normBtn").addEventListener("click", async () => {
   state.pcm = out;
   waveform.refreshData(out, state.sampleRate);
   player.setSource(out, state.sampleRate);
-  silenceZoneCache = null;
+  silenceRunCache = null;
   clearRenderCache();
   applySkipSilence();
   markUnsaved();
@@ -588,7 +698,8 @@ document.addEventListener("keydown", (e) => {
     const dx = e.clientX - drag.x;
     if (Math.abs(dx) > 3) drag.moved = true;
     dial.classList.add("dragging");
-    setSpeedUI(drag.start + dx * 0.005);
+    // Mid-drag: no skip-map re-base, so the drag stays smooth.
+    setSpeedUI(drag.start + dx * 0.005, false);
   });
   const endDrag = () => {
     if (!drag) return;
@@ -596,6 +707,7 @@ document.addEventListener("keydown", (e) => {
     drag = null;
     dial.classList.remove("dragging");
     if (!moved) setSpeedUI(speedValue + 0.25); // plain click
+    else if (skipSilence) rebaseSkipSilence();
     refreshClipDurations();
   };
   dial.addEventListener("pointerup", endDrag);
@@ -908,7 +1020,7 @@ function makeExportMap() {
       speedValue,
       $("classAware").checked,
       SKIP_MIN_S,
-      SKIP_KEEP_S
+      skipKeepSourceSeconds(speedValue)
     );
   }
   if (useBakedExport()) {
@@ -951,7 +1063,7 @@ function exportSource() {
         speedValue,
         $("classAware").checked,
         SKIP_MIN_S,
-        SKIP_KEEP_S
+        skipKeepSourceSeconds(speedValue)
       ),
       sampleRate: state.sampleRate,
     };
@@ -1009,7 +1121,9 @@ $("exportAll").addEventListener("click", async () => {
       const suffix = skip ? "nosilence" : `${speedValue.toFixed(2)}x`;
       const name = baked || skip ? `${base}-${suffix}` : base;
       exportSlice(src.pcm, src.sampleRate, 0, src.pcm.length, fmtSel, `${name}.${fmtSel}`);
-      markSaved();
+      // Only an unprocessed WAV actually preserves the recording; a baked,
+      // silence-stripped or MP3 export does not.
+      if (!baked && !skip && fmtSel === "wav") markSaved();
       $("exportStatus").textContent = skip
         ? `Exported whole file, silence removed, baked at ${speedValue.toFixed(2)}×`
         : baked
@@ -1059,7 +1173,10 @@ $("exportClips").addEventListener("click", async () => {
 
 // ── Boot ────────────────────────────────────────────────────────────────────
 window.addEventListener("beforeunload", (e) => {
-  if (state.pcm && !state.saved) {
+  // A recording in progress is only partly persisted, and closing mid-capture
+  // would lose the live stream entirely.
+  const recording = typeof recorder !== "undefined" && recorder.status() !== "idle";
+  if (recording || (state.pcm && !state.saved)) {
     e.preventDefault();
     e.returnValue = "";
   }
@@ -1077,28 +1194,35 @@ window.addEventListener("beforeunload", (e) => {
   $("cursorTime").textContent = "—";
   refreshDevices();
 
-  // Offer the previous session's autosaved clip instead of silently dropping it.
+  // Offer the most recent autosaved session instead of silently dropping it.
+  // The banner stays until an explicit choice; the slot is not overwritten by a
+  // later recording because every source gets its own session id.
   try {
     if (storageAvailable()) {
-      const rec = await loadAutosave();
-      if (rec && rec.blob && !state.pcm) {
+      const sessions = await listSessions();
+      const rec = sessions[0];
+      if (rec && !state.pcm) {
         const banner = $("recoverBanner");
         banner.style.display = "flex";
         $("recoverYes").onclick = async () => {
           banner.style.display = "none";
           try {
             await withBusy("Recovering session…", async () => {
-              const d = await decodeAudioBlob(rec.blob);
-              setSource(d.pcm, d.sampleRate, rec.name || "Recovered recording");
+              const loaded = await loadSession(rec.id);
+              if (!loaded) throw new Error("session is empty");
+              const d = await decodeAudioBlob(loaded.blob);
+              setSource(d.pcm, d.sampleRate, loaded.meta.name || "Recovered recording", {
+                autosave: false,
+                sessionId: loaded.meta.id,
+              });
             });
           } catch (err) {
             alert("Could not recover the previous session: " + err.message);
           }
-          clearAutosave().catch(() => {});
         };
         $("recoverNo").onclick = async () => {
           banner.style.display = "none";
-          await clearAutosave().catch(() => {});
+          await deleteSession(rec.id).catch(() => {});
         };
       }
     }

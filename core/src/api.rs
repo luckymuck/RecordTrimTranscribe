@@ -23,14 +23,51 @@ fn ratio_for_speed(speed: f64) -> f64 {
     (1.0 / speed.max(1e-3)).clamp(1e-3, 1.0)
 }
 
-/// The rate a class is rendered at, mirroring `rate::plan_rates` exactly.
+/// The rate a class is rendered at for a global scale `k`, mirroring
+/// `rate::plan_rates` exactly.
 ///
 /// Skip-silence derives both the rendered audio and its position map from this
 /// one function so the two cannot drift apart: a map built on a different rate
 /// than the render silently shifts every clip boundary.
-fn class_rate(cls: Class, ratio: f64) -> f64 {
+fn class_rate(cls: Class, scale: f64) -> f64 {
     let profile = profile_for(cls);
-    (ratio * profile.multiplier).clamp(profile.floor, 1.0)
+    (scale * profile.multiplier).clamp(profile.floor, 1.0)
+}
+
+/// Solve the global rate scale so a class-aware plan renders `ratio` overall.
+///
+/// `class_rate` floors each class (speech at 0.45), so feeding it the plain
+/// target ratio cannot reach the dial at high speed -- speech caps at about
+/// 2.2x no matter what. A single global scale `k` is solved so the summed output
+/// matches the target, and every class rate is then derived from that `k`.
+fn solve_scale(
+    segments: &[crate::timing::Segment],
+    in_length: i64,
+    ratio: f64,
+    sr: u32,
+) -> f64 {
+    let target = (in_length as f64 * ratio).max(1.0);
+    let total = |k: f64| -> f64 {
+        rate::plan_rates(segments, in_length, k, sr)
+            .iter()
+            .map(|r| r.out_duration() as f64)
+            .sum()
+    };
+    let (mut lo, mut hi) = (1e-4f64, 1.0f64);
+    let mut guard = 0;
+    while total(hi) < target && guard < 64 {
+        hi *= 2.0;
+        guard += 1;
+    }
+    for _ in 0..48 {
+        let mid = 0.5 * (lo + hi);
+        if total(mid) > target {
+            hi = mid;
+        } else {
+            lo = mid;
+        }
+    }
+    hi
 }
 
 /// Join pieces with a short overlap crossfade. Without it the splice between the
@@ -71,6 +108,7 @@ fn append_crossfaded(out: &mut Vec<f32>, rendered: &[f64], xf: usize) -> usize {
 fn skip_keep_list(
     segments: &[crate::timing::Segment],
     sr: u32,
+    scale: f64,
     ratio: f64,
     class_aware: bool,
     min_silence_s: f64,
@@ -81,6 +119,9 @@ fn skip_keep_list(
     for seg in segments {
         let seconds = (seg.end - seg.start) as f64 / sr as f64;
         if seg.cls == Class::Silence && seconds > min_silence_s {
+            // The kept pause is rendered at the plain target ratio, so its
+            // length follows the speed dial exactly (the 0.1 s floor is applied
+            // in the client). It is a pause, not speech to be compressed.
             let head_end = (seg.start + half).min(seg.end);
             if head_end > seg.start {
                 keep.push((seg.start, head_end, ratio));
@@ -92,7 +133,7 @@ fn skip_keep_list(
             continue;
         }
         let rate = if class_aware {
-            class_rate(seg.cls, ratio)
+            class_rate(seg.cls, scale)
         } else {
             ratio
         };
@@ -107,6 +148,80 @@ fn stretch_span(x: &[f64], rate: f64, sr: u32) -> Vec<f64> {
     let tm = TimeMap::uniform(x.len() as i64, rate).expect("rate is in (0,1]");
     let rates = hybrid::uniform_rate_plan(x.len() as i64, rate);
     hybrid::render(x, &tm, &rates, sr)
+}
+
+/// Offline render block size (seconds). Rendering a whole file at once keeps
+/// roughly eight to ten full-length `f64` arrays resident, which exceeds WASM
+/// memory well before an hour of audio. Blocks keep only a window alive.
+const RENDER_BLOCK_S: f64 = 30.0;
+/// Input overlap between blocks (seconds). The seam is crossfaded across the
+/// whole overlap, since the later block reproduces it with more right context.
+const RENDER_OVERLAP_S: f64 = 0.5;
+
+/// The `rates` restricted to `[a, b)`, rebased to zero.
+fn slice_rates(rates: &[crate::timing::SegmentRate], a: i64, b: i64) -> Vec<crate::timing::SegmentRate> {
+    let mut local = Vec::new();
+    for r in rates {
+        let start = r.start.max(a);
+        let end = r.end.min(b);
+        if end <= start {
+            continue;
+        }
+        local.push(crate::timing::SegmentRate {
+            start: start - a,
+            end: end - a,
+            rate: r.rate,
+            mode: r.mode,
+            cls: r.cls,
+            label: r.label.clone(),
+            head: r.head,
+        });
+    }
+    local
+}
+
+/// Crossfade `rendered` onto `out` over `xf` samples (f64 variant).
+fn append_crossfaded_f64(out: &mut Vec<f64>, rendered: &[f64], xf: usize) {
+    if rendered.is_empty() {
+        return;
+    }
+    let overlap = xf.min(out.len()).min(rendered.len());
+    let tail = out.len() - overlap;
+    for i in 0..overlap {
+        let t = (i + 1) as f64 / (overlap + 1) as f64;
+        out[tail + i] = out[tail + i] * (1.0 - t) + rendered[i] * t;
+    }
+    out.extend_from_slice(&rendered[overlap..]);
+}
+
+/// Render `x` with `rates` in blocks, crossfading each seam.
+fn render_blocks(x: &[f64], rates: &[crate::timing::SegmentRate], sr: u32) -> Vec<f64> {
+    let len = x.len() as i64;
+    let block = (RENDER_BLOCK_S * sr as f64) as i64;
+    if len <= block {
+        let tm = TimeMap::from_rates(rates, len);
+        return hybrid::render(x, &tm, rates, sr);
+    }
+    let overlap = ((RENDER_OVERLAP_S * sr as f64) as i64).max(1);
+    let mut out: Vec<f64> = Vec::new();
+    let mut a = 0i64;
+    while a < len {
+        let b = (a + block).min(len);
+        let local = slice_rates(rates, a, b);
+        let tm = TimeMap::from_rates(&local, b - a);
+        let rendered = hybrid::render(&x[a as usize..b as usize], &tm, &local, sr);
+        let xf = if out.is_empty() {
+            0
+        } else {
+            ((overlap as f64) * tm.ratio()).round() as usize
+        };
+        append_crossfaded_f64(&mut out, &rendered, xf);
+        if b >= len {
+            break;
+        }
+        a = b - overlap;
+    }
+    out
 }
 
 /// Crate version, useful for cache-busting the WASM in the client.
@@ -130,13 +245,12 @@ pub fn time_stretch(samples: &[f32], sample_rate: u32, speed: f64, class_aware: 
 
     let out = if class_aware {
         let segments = rate::align_by_energy(&x, sample_rate);
-        let rates = rate::plan_rates(&segments, x.len() as i64, ratio, sample_rate);
-        let tm = TimeMap::from_rates(&rates, x.len() as i64);
-        hybrid::render(&x, &tm, &rates, sample_rate)
+        let scale = solve_scale(&segments, x.len() as i64, ratio, sample_rate);
+        let rates = rate::plan_rates(&segments, x.len() as i64, scale, sample_rate);
+        render_blocks(&x, &rates, sample_rate)
     } else {
-        let tm = TimeMap::uniform(x.len() as i64, ratio).unwrap();
         let rates = hybrid::uniform_rate_plan(x.len() as i64, ratio);
-        hybrid::render(&x, &tm, &rates, sample_rate)
+        render_blocks(&x, &rates, sample_rate)
     };
 
     out.iter().map(|v| *v as f32).collect()
@@ -172,18 +286,14 @@ pub fn analyze(samples: &[f32], sample_rate: u32) -> String {
 }
 
 /// Silence runs longer than `min_silence_s`, as flat `[start, end, ...]` sample
-/// positions. Each zone is trimmed by `keep_s` at its end.
+/// positions. Boundaries are the raw detected silence edges; the caller insets
+/// them by the speed-dependent keep.
 ///
 /// Runs on the `f32` samples directly so enabling skip-silence on a long
 /// recording never materialises a full-length `f64` copy.
 #[wasm_bindgen]
-pub fn silence_zones(
-    samples: &[f32],
-    sample_rate: u32,
-    min_silence_s: f64,
-    keep_s: f64,
-) -> Vec<f64> {
-    rate::silence_zones_f32(samples, sample_rate, min_silence_s, keep_s)
+pub fn silence_zones(samples: &[f32], sample_rate: u32, min_silence_s: f64) -> Vec<f64> {
+    rate::silence_zones_f32(samples, sample_rate, min_silence_s)
 }
 
 /// Offline render with silence longer than `min_silence_s` cut down to a `keep_s`
@@ -206,7 +316,20 @@ pub fn time_stretch_skip_silence(
     }
     let ratio = ratio_for_speed(speed);
     let segments = rate::align_by_energy(&x, sample_rate);
-    let keep = skip_keep_list(&segments, sample_rate, ratio, class_aware, min_silence_s, keep_s);
+    let scale = if class_aware {
+        solve_scale(&segments, x.len() as i64, ratio, sample_rate)
+    } else {
+        ratio
+    };
+    let keep = skip_keep_list(
+        &segments,
+        sample_rate,
+        scale,
+        ratio,
+        class_aware,
+        min_silence_s,
+        keep_s,
+    );
 
     let mut out: Vec<f32> = Vec::new();
     let xf = crossfade_samples(sample_rate);
@@ -239,7 +362,8 @@ impl BakedMap {
         let ratio = ratio_for_speed(speed);
         let map = if class_aware {
             let segments = rate::align_by_energy(&x, sample_rate);
-            let rates = rate::plan_rates(&segments, x.len() as i64, ratio, sample_rate);
+            let scale = solve_scale(&segments, x.len() as i64, ratio, sample_rate);
+            let rates = rate::plan_rates(&segments, x.len() as i64, scale, sample_rate);
             TimeMap::from_rates(&rates, x.len() as i64)
         } else {
             TimeMap::uniform(x.len() as i64, ratio).unwrap()
@@ -279,7 +403,20 @@ impl SkipBakedMap {
         let x = to_f64(samples);
         let ratio = ratio_for_speed(speed);
         let segments = rate::align_by_energy(&x, sample_rate);
-        let keep = skip_keep_list(&segments, sample_rate, ratio, class_aware, min_silence_s, keep_s);
+        let scale = if class_aware {
+            solve_scale(&segments, x.len() as i64, ratio, sample_rate)
+        } else {
+            ratio
+        };
+        let keep = skip_keep_list(
+            &segments,
+            sample_rate,
+            scale,
+            ratio,
+            class_aware,
+            min_silence_s,
+            keep_s,
+        );
 
         let mut kept = Vec::with_capacity(keep.len());
         let mut out_pos = 0.0f64;

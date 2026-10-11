@@ -196,20 +196,20 @@ export function analyze(samples, sample_rate) {
 
 /**
  * Silence runs longer than `min_silence_s`, as flat `[start, end, ...]` sample
- * positions. Each zone is trimmed by `keep_s` at its end.
+ * positions. Boundaries are the raw detected silence edges; the caller insets
+ * them by the speed-dependent keep.
  *
  * Runs on the `f32` samples directly so enabling skip-silence on a long
  * recording never materialises a full-length `f64` copy.
  * @param {Float32Array} samples
  * @param {number} sample_rate
  * @param {number} min_silence_s
- * @param {number} keep_s
  * @returns {Float64Array}
  */
-export function silence_zones(samples, sample_rate, min_silence_s, keep_s) {
+export function silence_zones(samples, sample_rate, min_silence_s) {
     const ptr0 = passArrayF32ToWasm0(samples, wasm.__wbindgen_malloc);
     const len0 = WASM_VECTOR_LEN;
-    const ret = wasm.silence_zones(ptr0, len0, sample_rate, min_silence_s, keep_s);
+    const ret = wasm.silence_zones(ptr0, len0, sample_rate, min_silence_s);
     var v2 = getArrayF64FromWasm0(ret[0], ret[1]).slice();
     wasm.__wbindgen_free(ret[0], ret[1] * 8, 8);
     return v2;

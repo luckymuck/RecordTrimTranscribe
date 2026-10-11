@@ -11,6 +11,10 @@ export class Recorder {
     this.analyser = null;
     this.rafId = null;
     this.onLevel = null;
+    // Optional sink for each captured chunk, so a caller can persist the
+    // recording as it arrives instead of only at Stop.
+    this.onChunk = null;
+    this.chunkIndex = 0;
     this.startTime = 0;
     this.paused = false;
     this.pauseStart = 0;
@@ -20,6 +24,7 @@ export class Recorder {
   async start(onLevel, deviceId) {
     this.onLevel = onLevel;
     this.chunks = [];
+    this.chunkIndex = 0;
     this.paused = false;
     this.pausedTotalMs = 0;
     const audioConstraints = { echoCancellation: true, noiseSuppression: true };
@@ -36,7 +41,16 @@ export class Recorder {
 
     this.mediaRecorder = new MediaRecorder(this.stream);
     this.mediaRecorder.ondataavailable = (e) => {
-      if (e.data.size > 0) this.chunks.push(e.data);
+      if (e.data.size > 0) {
+        this.chunks.push(e.data);
+        if (this.onChunk) {
+          const index = this.chunkIndex++;
+          e.data
+            .arrayBuffer()
+            .then((buf) => this.onChunk(buf, index))
+            .catch(() => {});
+        }
+      }
     };
     this.mediaRecorder.start(250);
     this.startTime = performance.now();

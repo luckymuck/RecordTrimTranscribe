@@ -9,6 +9,7 @@
 //! splice one engine's output into the other's. It is enveloped so the source
 //! itself contains no steps: anything measured downstream is the engine's doing.
 
+use fasttalk_core::api::time_stretch;
 use fasttalk_core::engines::hybrid;
 use fasttalk_core::stream::StreamStretcher;
 use fasttalk_core::timing::TimeMap;
@@ -197,4 +198,21 @@ fn streaming_renders_faster_than_realtime() {
             "stream {speed}x: rendered {audio_seconds:.2}s of audio in {elapsed:.3}s ({realtime_factor:.1}x realtime)"
         );
     }
+}
+
+/// Offline rendering is done in blocks to bound memory (CORE-1). The seam
+/// between blocks must be crossfaded, not stepped. 40 s at 16 kHz spans more
+/// than one 30 s block.
+#[test]
+fn offline_block_seams_are_crossfaded() {
+    let sr = 16000;
+    let x = speech_like(40.0, sr);
+    let y = time_stretch(&x, sr, 2.0, false);
+    assert_continuity("blocked offline 40s @2x", &y, &x);
+    let expected = x.len() as f64 / 2.0;
+    assert!(
+        (y.len() as f64 - expected).abs() < 0.03 * expected,
+        "blocked render length {} vs expected ~{expected}",
+        y.len()
+    );
 }

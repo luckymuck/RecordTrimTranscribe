@@ -1,7 +1,7 @@
 //! Tests for skipping silence: the real-time `skip_to` jump and the offline
 //! skip-silence export.
 
-use fasttalk_core::api::{silence_zones, time_stretch_skip_silence, SkipBakedMap};
+use fasttalk_core::api::{silence_zones, time_stretch, time_stretch_skip_silence, SkipBakedMap};
 use fasttalk_core::stream::StreamStretcher;
 
 fn tone(f0: f64, seconds: f64, sr: u32, amp: f32) -> Vec<f32> {
@@ -196,14 +196,24 @@ fn silence_zones_finds_only_long_gaps() {
     x.extend(vec![0.0f32; (1.5 * sr as f64) as usize]); // 1.5 s > 0.5 s
     x.extend(tone(140.0, 0.5, sr, 0.3));
 
-    let zones = silence_zones(&x, sr, 0.5, 0.2);
+    let zones = silence_zones(&x, sr, 0.5);
     assert_eq!(zones.len(), 2, "expected exactly one zone, got {zones:?}");
-    // The kept 0.2 s is split evenly, so the zone is inset by 0.1 s on each side.
-    assert!((zones[0] - 28800.0).abs() < 2000.0, "zone start {}", zones[0]);
-    assert!((zones[1] - 91200.0).abs() < 2000.0, "zone end {}", zones[1]);
+    // Raw detected edges. The speech hangover (~100 ms) delays the detected
+    // silence start past the nominal 24000, which is the point: the tail of the
+    // last word stays on the speech side.
+    assert!(
+        (24000.0..=30000.0).contains(&zones[0]),
+        "zone start {} outside the hangover band",
+        zones[0]
+    );
+    assert!(
+        (95000.0..=97000.0).contains(&zones[1]),
+        "zone end {}",
+        zones[1]
+    );
 
     // A threshold above the gap length yields nothing.
-    assert!(silence_zones(&x, sr, 2.0, 0.2).is_empty());
+    assert!(silence_zones(&x, sr, 2.0).is_empty());
 }
 
 #[test]
@@ -259,10 +269,10 @@ fn skip_baked_map_agrees_with_the_render() {
 
     // Everything inside the skipped middle collapses to the boundary between the
     // kept head and the kept tail. The energy detector's boundary carries
-    // frame/hop resolution (~30 ms), so compare the probes to each other tightly
-    // and to the nominal boundary loosely.
+    // frame/hop resolution (~30 ms) plus the ~100 ms speech hangover, so compare
+    // the probes to each other tightly and to the nominal boundary loosely.
     let expected_boundary = (speech_len as f64 + 0.1 * sr as f64) * 0.5;
-    let resolution = 0.035 * sr as f64;
+    let resolution = 0.12 * sr as f64;
     // All three probes sit inside the skipped middle (between the two kept halves).
     let probes = [40000, 60000, 80000];
     let mapped: Vec<f64> = probes.iter().map(|p| map.map_position(*p as f64)).collect();
@@ -285,4 +295,28 @@ fn skip_baked_map_agrees_with_the_render() {
         "end {} != rendered length {out_len}",
         map.map_position(x.len() as f64)
     );
+}
+
+/// Class-aware mode must hit the requested speed, not just approach it. The
+/// per-class floors used to leave the baked output well short of the dial once
+/// the speed passed about 2x. The floors still cap the maximum reachable speed
+/// (speech cannot compress below 0.45), so this uses a pause-heavy signal whose
+/// floor minimum allows the requested targets.
+#[test]
+fn class_aware_bake_hits_the_target_speed() {
+    let sr = 48000;
+    let mut x = Vec::new();
+    for _ in 0..8 {
+        x.extend(tone(140.0, 0.25, sr, 0.3));
+        x.extend(vec![0.0f32; (0.85 * sr as f64) as usize]);
+    }
+    for speed in [2.0f64, 3.0, 4.0] {
+        let out = time_stretch(&x, sr, speed, true);
+        let expected = x.len() as f64 / speed;
+        let got = out.len() as f64;
+        assert!(
+            (got - expected).abs() < 0.05 * expected,
+            "speed {speed}: baked {got}, expected ~{expected}"
+        );
+    }
 }
