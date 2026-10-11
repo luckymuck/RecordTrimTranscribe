@@ -6,7 +6,7 @@ import { encode, encodeWav } from "./audio/encode.js";
 import { appendChunk, createSession, deleteSession, listSessions, loadSession, replaceSnapshot, storageAvailable } from "./storage.js";
 import { WaveformView } from "./ui/waveform.js";
 import { Player } from "./playback.js";
-import { transcribe, toSrt } from "./transcribe/whisper.js";
+import { transcribe, toSrt, cancelTranscription } from "./transcribe/whisper.js";
 import { buildClips, exportSlice, downloadBlob } from "./export/clips.js";
 
 const $ = (id) => document.getElementById(id);
@@ -764,7 +764,13 @@ function setTranscribeUi(active) {
   $("loadLabel").classList.toggle("is-disabled", active);
   $("transcribeScope").disabled = active;
   $("modelSel").disabled = active;
+  $("cancelTx").style.display = active ? "" : "none";
 }
+
+$("cancelTx").addEventListener("click", () => {
+  cancelTranscription();
+  $("txStatus").textContent = "Cancelling…";
+});
 
 /** Shift a clip transcript from clip-relative seconds back to whole-file seconds. */
 function offsetTranscriptTimestamps(result, offsetSeconds) {
@@ -865,7 +871,8 @@ $("transcribeBtn").addEventListener("click", async () => {
     $("txStatus").textContent = state.transcript.timestamped ? "Done" : "Done (no timestamps — model lacked cross-attention data)";
     $("txActions").style.display = "flex";
   } catch (e) {
-    $("txStatus").textContent = "Failed: " + e.message;
+    $("txStatus").textContent =
+      e && e.cancelled ? "Cancelled" : "Failed: " + e.message;
   } finally {
     transcribing = false;
     btn.disabled = false;
