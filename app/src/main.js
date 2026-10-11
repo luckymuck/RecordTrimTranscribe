@@ -1243,6 +1243,16 @@ window.addEventListener("beforeunload", (e) => {
   $("cursorTime").textContent = "—";
   refreshDevices();
 
+  // The WebGPU toggle is meaningless without a WebGPU adapter.
+  if (!navigator.gpu) {
+    const gpu = $("webgpuChk");
+    if (gpu) {
+      gpu.disabled = true;
+      const label = gpu.closest("label");
+      if (label) label.title = "WebGPU is not available in this browser";
+    }
+  }
+
   // Offer the most recent autosaved session instead of silently dropping it.
   // The banner stays until an explicit choice; the slot is not overwritten by a
   // later recording because every source gets its own session id.

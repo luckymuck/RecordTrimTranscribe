@@ -11,16 +11,53 @@ let loadedKey = null;
 let pending = null;
 let pendingKey = null;
 
-function pipelineOptions(device, onProgress) {
+// WebGPU load guard. `navigator.gpu` can exist without a usable adapter, and
+// requesting one can throw, so probe before asking for the WebGPU device.
+// Returns the dtype to use on WebGPU, or null when WebGPU is not usable.
+const WEBGPU_LOAD_TIMEOUT_MS = 120000;
+
+async function webgpuDtype() {
+  if (!navigator.gpu) return null;
+  try {
+    const adapter = await navigator.gpu.requestAdapter();
+    if (!adapter) return null;
+    // fp16 halves the download where the adapter supports it.
+    return adapter.features.has("shader-f16") ? "fp16" : "fp32";
+  } catch (e) {
+    return null;
+  }
+}
+
+function pipelineOptions(device, dtype, onProgress) {
   return {
-    dtype: "q8",
+    dtype,
     ...(device ? { device } : {}),
     progress_callback: onProgress,
   };
 }
 
+/** Reject if `promise` has not settled within `ms`. */
+function withTimeout(promise, ms, message) {
+  if (!ms) return promise;
+  return Promise.race([
+    promise,
+    new Promise((_, reject) => setTimeout(() => reject(new Error(message)), ms)),
+  ]);
+}
+
 async function getPipeline(modelId, onProgress, device, onStatus) {
-  const key = `${modelId}|${device || "wasm"}`;
+  let useDevice = device;
+  let dtype = "q8";
+  if (useDevice) {
+    const gpuDtype = await webgpuDtype();
+    if (gpuDtype) {
+      dtype = gpuDtype;
+    } else {
+      onStatus && onStatus("WebGPU not available — using WASM");
+      useDevice = undefined;
+    }
+  }
+  const key = `${modelId}|${useDevice || "wasm"}`;
   if (current && loadedKey === key) return current;
   if (pending && pendingKey === key) return pending;
   if (current) {
@@ -33,22 +70,32 @@ async function getPipeline(modelId, onProgress, device, onStatus) {
   }
   pendingKey = key;
   pending = (async () => {
-    try {
-      return await pipeline(
+    if (useDevice) {
+      // q8 is the WASM quantisation. The WebGPU execution provider needs a
+      // float dtype -- a quantized model on WebGPU tends to hang rather than
+      // fail, which is what made the WebGPU option appear to do nothing.
+      const load = pipeline(
         "automatic-speech-recognition",
         modelId,
-        pipelineOptions(device, onProgress)
+        pipelineOptions("webgpu", dtype, onProgress)
       );
-    } catch (err) {
-      if (!device) throw err;
-      onStatus && onStatus("WebGPU unavailable — falling back to WASM…");
+      return withTimeout(load, WEBGPU_LOAD_TIMEOUT_MS, "WebGPU load timed out");
+    }
+    return pipeline(
+      "automatic-speech-recognition",
+      modelId,
+      pipelineOptions(undefined, dtype, onProgress)
+    );
+  })()
+    .catch((err) => {
+      if (!useDevice) throw err;
+      onStatus && onStatus("WebGPU failed — falling back to WASM…");
       return pipeline(
         "automatic-speech-recognition",
         modelId,
-        pipelineOptions(undefined, onProgress)
+        pipelineOptions(undefined, "q8", onProgress)
       );
-    }
-  })()
+    })
     .then((pipe) => {
       current = pipe;
       loadedKey = key;
