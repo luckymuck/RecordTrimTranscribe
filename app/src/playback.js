@@ -51,6 +51,8 @@ export class Player {
     this.requestedSpeed = 1;
     this.finished = false;
     this.gaps = []; // sorted, non-overlapping {start, end} in source samples
+    this.removedBefore = new Float64Array(0);
+    this.keptBefore = new Float64Array(0);
     this._feed = new Float32Array(0);
     this._joinRamp = 240; // samples used to ease a closed gap (5 ms at 48 kHz)
     // Output-time -> kept-position map, one entry per scheduled chunk. The
@@ -78,29 +80,54 @@ export class Player {
           .map((z) => ({ start: z.start, end: z.end }))
           .sort((a, b) => a.start - b.start)
       : [];
+    // Cumulative lengths so the position maps are binary searches rather than
+    // a scan of every gap on every 50 ms tick.
+    const n = this.gaps.length;
+    this.removedBefore = new Float64Array(n);
+    this.keptBefore = new Float64Array(n);
+    let removed = 0;
+    for (let i = 0; i < n; i++) {
+      this.removedBefore[i] = removed;
+      this.keptBefore[i] = this.gaps[i].start - removed;
+      removed += this.gaps[i].end - this.gaps[i].start;
+    }
   }
 
   /** Number of kept samples before source position `p`. */
   sourceToKept(p) {
-    let removed = 0;
-    for (const g of this.gaps) {
-      if (p <= g.start) break;
-      removed += Math.min(p, g.end) - g.start;
+    const gaps = this.gaps;
+    let lo = 0;
+    let hi = gaps.length;
+    while (lo < hi) {
+      const mid = (lo + hi) >> 1;
+      if (gaps[mid].start <= p) lo = mid + 1;
+      else hi = mid;
     }
-    return p - removed;
+    const i = lo - 1;
+    if (i < 0) return p;
+    const g = gaps[i];
+    return p - (this.removedBefore[i] + Math.min(p, g.end) - g.start);
   }
 
   /** Source position corresponding to kept position `k`. */
   keptToSource(k) {
-    let consumed = 0;
-    let prev = 0;
-    for (const g of this.gaps) {
-      const kept = g.start - prev;
-      if (k < consumed + kept) return prev + (k - consumed);
-      consumed += kept;
-      prev = g.end;
+    const gaps = this.gaps;
+    let lo = 0;
+    let hi = gaps.length;
+    while (lo < hi) {
+      const mid = (lo + hi) >> 1;
+      if (this.keptBefore[mid] > k) hi = mid;
+      else lo = mid + 1;
     }
-    return prev + (k - consumed);
+    const i = lo; // first gap whose kept position is past k
+    if (i >= gaps.length) {
+      const last = gaps.length - 1;
+      return last < 0 ? k : gaps[last].end + (k - this.keptBefore[last]);
+    }
+    if (i === 0) return k;
+    const prev = gaps[i - 1].end;
+    const segStart = this.keptBefore[i] - (gaps[i].start - prev);
+    return k >= segStart ? prev + (k - segStart) : gaps[i - 1].end;
   }
 
   play(fromSample, speed) {
@@ -361,6 +388,12 @@ export class Player {
       } catch (e) {}
     }
     this.sources = [];
+    // Release the WASM object eagerly instead of waiting for the finalizer.
+    if (this.stretcher) {
+      try {
+        this.stretcher.free();
+      } catch (e) {}
+    }
     this.stretcher = null;
     this.posLog = [];
   }

@@ -2,6 +2,10 @@
 // Concepts adapted from the AudioSplitter.html waveform viewer.
 
 const MAX_BUCKETS = 40000;
+// Grab radius for a split, in CSS pixels. Both the drag hit test and the
+// context-menu hit test use it, so they cannot disagree (they used to be 6/dpr
+// and 7 device px, which is hard to hit on high-DPI and touch screens).
+const SPLIT_HIT_PX = 8;
 
 export class WaveformView {
   constructor({ main, overview, playhead, onSeek, onSplitsChange, onViewChange }) {
@@ -25,6 +29,9 @@ export class WaveformView {
     this.playhead = -1;
     this._dragging = null;
     this._ctxMenu = null;
+    // Auto-scroll to keep the cursor visible. Turned off when the user pans or
+    // zooms so the view stops fighting them, and back on when they seek.
+    this.followPlayhead = true;
 
     this.labelsEl = document.createElement("div");
     this.labelsEl.className = "split-label-layer";
@@ -50,6 +57,7 @@ export class WaveformView {
     this.viewStart = 0;
     this.viewLen = pcm.length;
     this.playhead = -1;
+    this.followPlayhead = true;
     this._resize();
     this.onSplitsChange(this.splits);
   }
@@ -121,6 +129,7 @@ export class WaveformView {
     if (!this.pcm) return;
     this.viewStart = 0;
     this.viewLen = this.pcm.length;
+    this.followPlayhead = true;
     this.draw();
     this.onViewChange(this._zoomLabel());
   }
@@ -147,11 +156,17 @@ export class WaveformView {
       return;
     }
     // Keep the cursor visible while playing: scroll the view before it reaches
-    // the edge instead of letting it disappear off-screen.
+    // the edge. Only when following, and only when there is somewhere to
+    // scroll -- fully zoomed out, the cursor is always visible and the edge
+    // test would force a full redraw on every tick for nothing.
     const w = this.main.clientWidth || 1;
     const x = this.sampleToX(sample);
     const margin = Math.max(24, w * 0.06);
-    if (x < margin || x > w - margin) {
+    if (
+      this.followPlayhead &&
+      this.viewLen < this.pcm.length &&
+      (x < margin || x > w - margin)
+    ) {
       this.viewStart = sample - this.viewLen * 0.15;
       this._clampView();
       this.draw();
@@ -236,6 +251,10 @@ export class WaveformView {
     const dpr = window.devicePixelRatio || 1;
     const spp = this.viewLen / w;
 
+    // The split pass below sets lineWidth to 2*dpr and never restores it, so
+    // reset it here or the centre line and the raw trace thicken on redraw.
+    ctx.lineWidth = dpr;
+
     ctx.strokeStyle = "#2b3244";
     ctx.beginPath();
     ctx.moveTo(0, mid);
@@ -259,9 +278,30 @@ export class WaveformView {
         const y1 = mid - mn * mid;
         ctx.fillRect(x, y0, 1, Math.max(1, y1 - y0));
       }
+    } else if (spp > 1) {
+      // Between one sample per pixel and one bucket per pixel. Drawing a single
+      // raw sample per column misses the peaks in between, so the waveform
+      // looks like noise; take the min/max of the samples each column covers.
+      for (let x = 0; x < w; x++) {
+        const s = Math.floor(this.viewStart + x * spp);
+        const e = Math.min(
+          this.pcm.length,
+          Math.max(s + 1, Math.floor(this.viewStart + (x + 1) * spp))
+        );
+        let mn = 1,
+          mx = -1;
+        for (let i = s; i < e; i++) {
+          const v = this.pcm[i];
+          if (v < mn) mn = v;
+          if (v > mx) mx = v;
+        }
+        const y0 = mid - mx * mid;
+        const y1 = mid - mn * mid;
+        ctx.fillRect(x, y0, 1, Math.max(1, y1 - y0));
+      }
     } else {
-      // Zoomed in past the bucket size: draw the raw samples as a line. The
-      // stroke style is set here because the centre line above left it grey.
+      // Zoomed in past one sample per pixel: draw the raw samples as a line.
+      // The stroke style is set here because the centre line above left it grey.
       ctx.strokeStyle = "#5eead4";
       ctx.beginPath();
       for (let x = 0; x < w; x++) {
@@ -383,7 +423,7 @@ export class WaveformView {
       const x = e.clientX - rect.left;
       let hit = -1;
       for (let i = 0; i < this.splits.length; i++) {
-        if (Math.abs(this.sampleToX(this.splits[i]) - x) < 7) {
+        if (Math.abs(this.sampleToX(this.splits[i]) - x) < SPLIT_HIT_PX) {
           hit = i;
           break;
         }
@@ -397,11 +437,24 @@ export class WaveformView {
     main.addEventListener("wheel", (e) => {
       if (!this.pcm) return;
       e.preventDefault();
+      this.followPlayhead = false;
       const rect = main.getBoundingClientRect();
+      if (Math.abs(e.deltaX) > Math.abs(e.deltaY)) {
+        // Horizontal pan (trackpad two-finger / shift+wheel).
+        this.viewStart += (e.deltaX / Math.max(1, rect.width)) * this.viewLen;
+        this._clampView();
+        this.draw();
+        this.onViewChange(this._zoomLabel());
+        return;
+      }
       const x = e.clientX - rect.left;
       const anchor = this.xToSample(x);
-      const factor = e.deltaY < 0 ? 0.8 : 1.25;
-      let newLen = Math.max(64, Math.min(this.pcm.length, this.viewLen * factor));
+      // Scale by the delta magnitude: a fixed 0.8/1.25 per event makes
+      // trackpad inertia over-zoom by many steps at once.
+      const magnitude = Math.min(2, Math.abs(e.deltaY) / 100);
+      const factor =
+        e.deltaY < 0 ? Math.pow(0.8, magnitude) : Math.pow(1.25, magnitude);
+      const newLen = Math.max(64, Math.min(this.pcm.length, this.viewLen * factor));
       this.viewStart = anchor - (anchor - this.viewStart) * (newLen / this.viewLen);
       this.viewLen = newLen;
       this._clampView();
@@ -420,10 +473,9 @@ export class WaveformView {
         return;
       }
       // Near a split? start dragging it.
-      const dpr = window.devicePixelRatio || 1;
       let hit = -1;
       for (let i = 0; i < this.splits.length; i++) {
-        if (Math.abs(this.sampleToX(this.splits[i]) * dpr - x * dpr) < 6) {
+        if (Math.abs(this.sampleToX(this.splits[i]) - x) < SPLIT_HIT_PX) {
           hit = i;
           break;
         }
@@ -432,6 +484,8 @@ export class WaveformView {
         this._dragging = { type: "split", index: hit };
       } else {
         this._dragging = { type: "scroll", x, startView: this.viewStart };
+        // The user is taking control of the view; stop auto-scrolling.
+        this.followPlayhead = false;
       }
       main.setPointerCapture(e.pointerId);
     });
@@ -442,8 +496,12 @@ export class WaveformView {
       const x = e.clientX - rect.left;
       if (this._dragging.type === "split") {
         const s = Math.max(0, Math.min(this.pcm.length, this.xToSample(x)));
-        this.splits[this._dragging.index] = Math.round(s);
+        const value = Math.round(s);
+        this.splits[this._dragging.index] = value;
         this.splits.sort((a, b) => a - b);
+        // Sorting can move the dragged split, so re-find it; otherwise the next
+        // move writes to whichever split now sits at the old index.
+        this._dragging.index = this.splits.indexOf(value);
         // `true` = mid-drag: the listener should do only the cheap label update.
         this.onSplitsChange(this.splits, true);
         this.draw();
@@ -456,6 +514,11 @@ export class WaveformView {
     });
 
     main.addEventListener("pointerup", (e) => {
+      // The source can be cleared mid-drag; do not dereference a null pcm.
+      if (!this.pcm) {
+        this._dragging = null;
+        return;
+      }
       const finishedSplit = this._dragging && this._dragging.type === "split";
       if (this._dragging && this._dragging.type === "scroll") {
         const moved = Math.abs(e.clientX - this.main.getBoundingClientRect().left - this._dragging.x);
@@ -463,6 +526,8 @@ export class WaveformView {
           const rect = main.getBoundingClientRect();
           const s = this.xToSample(e.clientX - rect.left);
           this.onSeek(Math.max(0, Math.min(this.pcm.length - 1, Math.round(s))));
+          // The user placed the cursor; following from here is expected.
+          this.followPlayhead = true;
         }
       }
       this._dragging = null;
@@ -471,6 +536,14 @@ export class WaveformView {
       this.onViewChange(this._zoomLabel());
     });
 
+    // A cancelled pointer (touch scrolling, capture loss) must end the drag, or
+    // the next hover keeps panning or dragging.
+    const cancelDrag = () => {
+      this._dragging = null;
+    };
+    main.addEventListener("pointercancel", cancelDrag);
+    main.addEventListener("lostpointercapture", cancelDrag);
+
     this.overview.addEventListener("pointerdown", (e) => {
       if (!this.pcm) return;
       const rect = this.overview.getBoundingClientRect();
@@ -478,6 +551,7 @@ export class WaveformView {
       const centre = frac * this.pcm.length;
       this.viewStart = centre - this.viewLen / 2;
       this._clampView();
+      this.followPlayhead = true;
       this.draw();
       this.onViewChange(this._zoomLabel());
     });

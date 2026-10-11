@@ -239,7 +239,12 @@ pub fn pitch_marks(x: &[f64], sr: u32, track: &F0Track, pitch_range_hz: f64) -> 
         return Vec::new();
     }
 
-    let low = convolve_same(x, &lowpass_kernel(sr, pitch_range_hz, 129));
+    // A windowed-sinc's transition width is about 3.3*fs/N taps, so a fixed
+    // 129 taps gives a ~410 Hz transition at 16 kHz but ~1.2 kHz at 48 kHz --
+    // the band the marks are picked from gets smeared at higher rates. Scale
+    // the tap count with the rate to hold the transition width constant.
+    let taps = (((129.0 * sr as f64) / 16000.0).round() as usize).max(33) | 1;
+    let low = convolve_same(x, &lowpass_kernel(sr, pitch_range_hz, taps));
     let voiced = &track.voiced;
     let limit = (low.len() - 1) as i64;
     let max_marks = n_frames * 40;

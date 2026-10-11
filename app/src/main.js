@@ -311,6 +311,9 @@ function setSource(pcm, sampleRate, label, { autosave = true, saved = false, ses
   state.splits = [];
   state.sourceName = label || "recording";
   state.sessionId = sessionId || newSessionId();
+  // Play should start at the beginning of the new source, not wherever the
+  // previous one was left.
+  state.cursorSample = 0;
   waveform.setData(pcm, sampleRate);
   player.setSource(pcm, sampleRate);
   silenceRunCache = null;
@@ -522,7 +525,7 @@ $("recordBtn").addEventListener("click", async () => {
   try {
     await recorder.start((level) => {
       $("meterFill").style.width = Math.min(100, level * 140) + "%";
-    }, state.inputDeviceId);
+    }, state.inputDeviceId, $("voiceProc").checked);
     createSession(sessionId, {
       name: recordingName(),
       sampleRate: audioContext().sampleRate,
@@ -591,6 +594,8 @@ $("fileInput").addEventListener("change", async (e) => {
   } catch (err) {
     alert("Could not decode file: " + err.message);
   }
+  // Clear the input so choosing the same file again still fires a change event.
+  e.target.value = "";
 });
 
 // ── Waveform tools ──────────────────────────────────────────────────────────
@@ -701,17 +706,18 @@ document.addEventListener("keydown", (e) => {
     // Mid-drag: no skip-map re-base, so the drag stays smooth.
     setSpeedUI(drag.start + dx * 0.005, false);
   });
-  const endDrag = () => {
+  const endDrag = (cancelled) => {
     if (!drag) return;
     const moved = drag.moved;
     drag = null;
     dial.classList.remove("dragging");
-    if (!moved) setSpeedUI(speedValue + 0.25); // plain click
+    // A cancelled pointer (touch scroll, capture loss) is not a click.
+    if (!moved && !cancelled) setSpeedUI(speedValue + 0.25); // plain click
     else if (skipSilence) rebaseSkipSilence();
     refreshClipDurations();
   };
-  dial.addEventListener("pointerup", endDrag);
-  dial.addEventListener("pointercancel", endDrag);
+  dial.addEventListener("pointerup", () => endDrag(false));
+  dial.addEventListener("pointercancel", () => endDrag(true));
   dial.addEventListener("dblclick", (e) => {
     e.preventDefault();
     setSpeedUI(1.0);
@@ -781,6 +787,32 @@ function offsetTranscriptTimestamps(result, offsetSeconds) {
   };
 }
 
+/**
+ * Merge a clip-scope result into the existing transcript instead of replacing
+ * it, so the TXT/SRT downloads keep the rest of the file. Only the chunks
+ * inside the transcribed range are replaced.
+ */
+function mergeTranscript(existing, fresh, scope) {
+  const start = scope && scope.offsetSeconds;
+  if (
+    !existing ||
+    !existing.chunks ||
+    !fresh ||
+    !fresh.chunks ||
+    !Number.isFinite(start) ||
+    start === 0
+  ) {
+    return fresh;
+  }
+  const end = start + scope.pcm.length / state.sampleRate;
+  const kept = existing.chunks.filter((c) => {
+    if (!Array.isArray(c.timestamp)) return true;
+    return c.timestamp[0] < start || c.timestamp[0] >= end;
+  });
+  const chunks = kept.concat(fresh.chunks).sort((a, b) => a.timestamp[0] - b.timestamp[0]);
+  return { text: chunks.map((c) => c.text || "").join(""), chunks, timestamped: true };
+}
+
 // ── Transcription ─────────────────────────────────────────────────────────────
 $("transcribeBtn").addEventListener("click", async () => {
   if (!state.pcm) return;
@@ -804,6 +836,8 @@ $("transcribeBtn").addEventListener("click", async () => {
     status.startsWith("Transcribing") ? status.replace(/^Transcribing/, `Transcribing ${scope.label}`) : status;
   try {
     const raw = await transcribe(scope.pcm, state.sampleRate, $("modelSel").value, {
+      language: $("langSel").value || undefined,
+      device: $("webgpuChk").checked ? "webgpu" : undefined,
       onStatus: (s) => ($("txStatus").textContent = prefixStatus(s)),
       onProgress: (p) => {
         // Model download/load occupies the first 60%.
@@ -824,7 +858,8 @@ $("transcribeBtn").addEventListener("click", async () => {
         }
       },
     });
-    state.transcript = offsetTranscriptTimestamps(raw, scope.offsetSeconds);
+    const fresh = offsetTranscriptTimestamps(raw, scope.offsetSeconds);
+    state.transcript = mergeTranscript(state.transcript, fresh, scope);
     renderTranscript(state.transcript);
     updateSplitLabels();
     $("txStatus").textContent = state.transcript.timestamped ? "Done" : "Done (no timestamps — model lacked cross-attention data)";
@@ -1139,18 +1174,32 @@ $("exportClips").addEventListener("click", async () => {
   if (!state.pcm) return;
   const fmtSel = $("exportFormat").value;
   await withBusy("Exporting clips…", async () => {
+    const names = currentClipNames();
+    const base = (state.sourceName || "recording").replace(/\.[^.]+$/, "").replace(/\s+/g, " ");
     let ranges;
+    let mapper = null;
     try {
+      // One render and one position map for every clip, not one of each per
+      // clip, and honour the per-row name fields.
+      const src = exportSource();
+      mapper = makeExportMap();
       const clips = buildClips(state.splits, state.pcm.length);
-      ranges = clips.map((clip) => mapClipForExport(clip));
+      ranges = clips.map((clip, i) => ({
+        name: (names[i] || `clip-${String(i + 1).padStart(2, "0")}`).trim(),
+        pcm: src.pcm,
+        start: mapper ? mapper.mapSample(clip.start) : clip.start,
+        end: mapper ? mapper.mapSample(clip.end) : clip.end,
+      }));
     } catch (err) {
       $("exportStatus").textContent = `Export failed: ${err.message}`;
       return;
+    } finally {
+      if (mapper) mapper.dispose();
     }
     // Download inside this click's user activation. Staggering with setTimeout
     // loses the activation and the browser then blocks the downloads.
     let count = 0;
-    ranges.forEach((range, i) => {
+    ranges.forEach((range) => {
       try {
         if (range.end > range.start) {
           exportSlice(
@@ -1159,7 +1208,7 @@ $("exportClips").addEventListener("click", async () => {
             range.start,
             range.end,
             fmtSel,
-            `clip-${String(i + 1).padStart(2, "0")}.${fmtSel}`
+            `${base}-${range.name}.${fmtSel}`
           );
           count++;
         }

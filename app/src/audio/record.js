@@ -21,19 +21,34 @@ export class Recorder {
     this.pausedTotalMs = 0;
   }
 
-  async start(onLevel, deviceId) {
+  async start(onLevel, deviceId, voiceProcessing = false) {
     this.onLevel = onLevel;
     this.chunks = [];
     this.chunkIndex = 0;
     this.paused = false;
     this.pausedTotalMs = 0;
-    const audioConstraints = { echoCancellation: true, noiseSuppression: true };
+    // Default all browser voice processing OFF. Noise suppression clips quiet
+    // word onsets and auto gain pumps the noise floor during pauses, which
+    // breaks silence detection; echo cancellation is for calls, not capture.
+    const audioConstraints = {
+      echoCancellation: voiceProcessing,
+      noiseSuppression: voiceProcessing,
+      autoGainControl: voiceProcessing,
+      channelCount: 1,
+    };
     if (deviceId) audioConstraints.deviceId = { exact: deviceId };
     this.stream = await navigator.mediaDevices.getUserMedia({
       audio: audioConstraints,
     });
 
     const ctx = audioContext();
+    // The context is created at import time, before any gesture, so it starts
+    // suspended; without this the analyser never runs and the meter stays dead.
+    if (ctx.state === "suspended") {
+      try {
+        await ctx.resume();
+      } catch (e) {}
+    }
     const src = ctx.createMediaStreamSource(this.stream);
     this.analyser = ctx.createAnalyser();
     this.analyser.fftSize = 512;

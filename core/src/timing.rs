@@ -197,14 +197,12 @@ impl TimeMap {
 
     /// Input sample position heard at the given output sample position.
     pub fn input_at(&self, out_position: f64) -> f64 {
-        interp(out_position, &self.anchors.iter().map(|a| a.1 as f64).collect::<Vec<_>>(),
-               &self.anchors.iter().map(|a| a.0 as f64).collect::<Vec<_>>())
+        interp_axis(&self.anchors, out_position, true)
     }
 
     /// Output sample position corresponding to the given input sample position.
     pub fn output_at(&self, in_position: f64) -> f64 {
-        interp(in_position, &self.anchors.iter().map(|a| a.0 as f64).collect::<Vec<_>>(),
-               &self.anchors.iter().map(|a| a.1 as f64).collect::<Vec<_>>())
+        interp_axis(&self.anchors, in_position, false)
     }
 
     /// Local input-to-output slope at the given input position.
@@ -228,35 +226,40 @@ impl TimeMap {
     }
 }
 
-/// Linear interpolation with clamping outside the anchor range.
-fn interp(q: f64, xp: &[f64], fp: &[f64]) -> f64 {
-    let n = xp.len();
+/// Linear interpolation over the anchors with clamping outside the range.
+///
+/// Binary-searches the anchor slice directly. The previous form built two
+/// `Vec<f64>` of every anchor per call, which `psola::output_marks` then hit in
+/// a loop -- quadratic on long class-aware plans.
+fn interp_axis(anchors: &[(i64, i64)], q: f64, by_output: bool) -> f64 {
+    let n = anchors.len();
     if n == 0 {
         return 0.0;
     }
-    if q <= xp[0] {
-        return fp[0];
+    let key = |a: &(i64, i64)| if by_output { a.1 as f64 } else { a.0 as f64 };
+    let val = |a: &(i64, i64)| if by_output { a.0 as f64 } else { a.1 as f64 };
+    if q <= key(&anchors[0]) {
+        return val(&anchors[0]);
     }
-    if q >= xp[n - 1] {
-        return fp[n - 1];
+    if q >= key(&anchors[n - 1]) {
+        return val(&anchors[n - 1]);
     }
-    // Locate the interval by binary search.
     let mut lo = 0usize;
     let mut hi = n - 1;
     while hi - lo > 1 {
         let mid = (lo + hi) / 2;
-        if xp[mid] <= q {
+        if key(&anchors[mid]) <= q {
             lo = mid;
         } else {
             hi = mid;
         }
     }
-    let span = xp[hi] - xp[lo];
+    let span = key(&anchors[hi]) - key(&anchors[lo]);
     if span <= 0.0 {
-        return fp[lo];
+        return val(&anchors[lo]);
     }
-    let t = (q - xp[lo]) / span;
-    fp[lo] + t * (fp[hi] - fp[lo])
+    let t = (q - key(&anchors[lo])) / span;
+    val(&anchors[lo]) + t * (val(&anchors[hi]) - val(&anchors[lo]))
 }
 
 /// Monotone evaluation of a time map for use inside tight loops.

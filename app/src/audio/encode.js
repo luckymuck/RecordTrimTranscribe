@@ -1,4 +1,5 @@
 // Audio encoders: 16-bit WAV (native) and MP3 (lamejs).
+import { resample } from "./decode.js";
 
 function floatToInt16(pcm) {
   const out = new Int16Array(pcm.length);
@@ -41,8 +42,12 @@ export function encodeWav(pcm, sampleRate) {
 export function encodeMp3(pcm, sampleRate, kbps = 128) {
   const lame = window.lamejs;
   if (!lame) throw new Error("lamejs not loaded");
-  const samples = floatToInt16(pcm);
-  const encoder = new lame.Mp3Encoder(1, sampleRate, kbps);
+  // lamejs only supports MPEG rates up to 48 kHz, so a 96/88.2 kHz context
+  // would fail outright. Resample down first.
+  const rate = sampleRate > 48000 ? 48000 : sampleRate;
+  const source = rate === sampleRate ? pcm : resample(pcm, sampleRate, rate);
+  const samples = floatToInt16(source);
+  const encoder = new lame.Mp3Encoder(1, rate, kbps);
   const blockSize = 1152;
   const data = [];
   for (let i = 0; i < samples.length; i += blockSize) {

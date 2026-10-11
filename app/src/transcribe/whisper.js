@@ -5,22 +5,72 @@ import { resampleHQ } from "../audio/decode.js";
 env.allowLocalModels = false;
 
 let current = null;
-let loadedId = null;
+let loadedKey = null;
+// In-flight load, so two quick clicks share one download rather than starting
+// two; also lets a model switch dispose the previous pipeline.
+let pending = null;
+let pendingKey = null;
 
-async function getPipeline(modelId, onProgress) {
-  if (current && loadedId === modelId) return current;
-  current = await pipeline("automatic-speech-recognition", modelId, {
+function pipelineOptions(device, onProgress) {
+  return {
     dtype: "q8",
+    ...(device ? { device } : {}),
     progress_callback: onProgress,
-  });
-  loadedId = modelId;
-  return current;
+  };
+}
+
+async function getPipeline(modelId, onProgress, device, onStatus) {
+  const key = `${modelId}|${device || "wasm"}`;
+  if (current && loadedKey === key) return current;
+  if (pending && pendingKey === key) return pending;
+  if (current) {
+    // Switching models: release the old pipeline's WASM heaps.
+    try {
+      await current.dispose();
+    } catch (e) {}
+    current = null;
+    loadedKey = null;
+  }
+  pendingKey = key;
+  pending = (async () => {
+    try {
+      return await pipeline(
+        "automatic-speech-recognition",
+        modelId,
+        pipelineOptions(device, onProgress)
+      );
+    } catch (err) {
+      if (!device) throw err;
+      onStatus && onStatus("WebGPU unavailable — falling back to WASM…");
+      return pipeline(
+        "automatic-speech-recognition",
+        modelId,
+        pipelineOptions(undefined, onProgress)
+      );
+    }
+  })()
+    .then((pipe) => {
+      current = pipe;
+      loadedKey = key;
+      pending = null;
+      pendingKey = null;
+      return pipe;
+    })
+    .catch((err) => {
+      pending = null;
+      pendingKey = null;
+      throw err;
+    });
+  return pending;
 }
 
 const TRANSCRIPTION_WINDOW_SECONDS = 30;
 const TRANSCRIPTION_TARGET_SECONDS = 27.5;
 const TRANSCRIPTION_OVERLAP_SECONDS = 2.5;
 const TRANSCRIPTION_MIN_SILENCE_SECONDS = 0.35;
+// A window's main body must reach at least this far before a silence cut is
+// allowed, so windows do not become tiny.
+const TRANSCRIPTION_MIN_MAIN_SECONDS = 12;
 
 function yieldToUI() {
   return new Promise((resolve) => {
@@ -94,7 +144,7 @@ function splitTranscriptionWindows(samples, sampleRate) {
     return [{ audioStart: 0, audioEnd: total, assignStart: 0, assignEnd: total }];
   }
 
-  const minimumMain = Math.max(1, Math.round(TRANSCRIPTION_TARGET_SECONDS * sampleRate));
+  const minimumMain = Math.max(1, Math.round(TRANSCRIPTION_MIN_MAIN_SECONDS * sampleRate));
   const overlap = Math.max(1, Math.round(TRANSCRIPTION_OVERLAP_SECONDS * sampleRate));
   const gaps = findSilenceGaps(samples, sampleRate);
   const windows = [];
@@ -105,15 +155,21 @@ function splitTranscriptionWindows(samples, sampleRate) {
     const audioEnd = Math.min(audioStart + maximum, total);
     let assignEnd = audioEnd;
     if (audioEnd < total) {
-      const candidates = gaps.filter(
-        ([gapStart, gapEnd]) => gapStart > assignStart && gapEnd < audioEnd
-      );
-      const preferred = [...candidates]
-        .reverse()
-        .find(([gapStart, gapEnd]) => Math.round((gapStart + gapEnd) / 2) - assignStart >= minimumMain);
-      assignEnd = preferred
-        ? Math.round((preferred[0] + preferred[1]) / 2)
-        : Math.min(total, audioEnd - overlap);
+      // Cut at the longest silence that starts late enough to leave a usable
+      // main body and ends before the overlap window, so the next window keeps
+      // real acoustic context. The previous test required the cut to sit
+      // >= 27.5 s past assignStart, which is impossible once audioEnd is
+      // assignStart + 27.5 s -- so every cut fell back to mid-speech.
+      const latestCut = audioEnd - overlap;
+      let best = null;
+      for (const [gapStart, gapEnd] of gaps) {
+        if (gapStart <= assignStart + minimumMain) continue;
+        if (gapEnd > latestCut) continue;
+        if (!best || gapEnd - gapStart > best[1] - best[0]) best = [gapStart, gapEnd];
+      }
+      assignEnd = best
+        ? Math.round((best[0] + best[1]) / 2)
+        : Math.min(total, latestCut);
       assignEnd = Math.max(assignStart + 1, assignEnd);
     }
 
@@ -139,13 +195,16 @@ function splitTranscriptionWindows(samples, sampleRate) {
  * `*_timestamped` ONNX exports). If the selected model cannot provide them, we
  * transparently retry without timestamps and return plain text.
  */
-export async function transcribe(pcm, sampleRate, modelId, { onProgress, onStatus, onSegment } = {}) {
+export async function transcribe(pcm, sampleRate, modelId, { onProgress, onStatus, onSegment, language, device } = {}) {
   onStatus && onStatus("Loading model…");
-  const pipe = await getPipeline(modelId, onProgress);
+  const pipe = await getPipeline(modelId, onProgress, device, onStatus);
   onStatus && onStatus("Transcribing… 0%");
   const pcm16k = await resampleHQ(pcm, sampleRate, 16000);
   const windows = splitTranscriptionWindows(pcm16k, 16000);
   const totalSeconds = pcm16k.length / 16000;
+  // Forcing the language avoids per-window auto-detection, which can mislabel
+  // quiet or noisy windows and produce the wrong language (or a translation).
+  const baseOptions = language ? { language } : {};
 
   let text = "";
   const chunks = [];
@@ -161,7 +220,7 @@ export async function transcribe(pcm, sampleRate, modelId, { onProgress, onStatu
       try {
         const result = await pipe(
           pcm16k.subarray(window.audioStart, window.audioEnd),
-          { return_timestamps: "word" }
+          { ...baseOptions, return_timestamps: "word" }
         );
         const words = Array.isArray(result.chunks) ? result.chunks : [];
         const timestamped = words.filter((word) => Array.isArray(word.timestamp));
@@ -169,7 +228,7 @@ export async function transcribe(pcm, sampleRate, modelId, { onProgress, onStatu
           wantTimestamps = false;
           const fallback = await pipe(
             pcm16k.subarray(window.assignStart, window.assignEnd),
-            {}
+            { ...baseOptions }
           );
           text += fallback.text || "";
         } else {
@@ -197,7 +256,7 @@ export async function transcribe(pcm, sampleRate, modelId, { onProgress, onStatu
           onStatus && onStatus("Model lacks timestamp data — transcribing without timestamps…");
           const fallback = await pipe(
             pcm16k.subarray(window.assignStart, window.assignEnd),
-            {}
+            { ...baseOptions }
           );
           text += fallback.text || "";
         } else {
@@ -207,7 +266,7 @@ export async function transcribe(pcm, sampleRate, modelId, { onProgress, onStatu
     } else {
       const fallback = await pipe(
         pcm16k.subarray(window.assignStart, window.assignEnd),
-        {}
+        { ...baseOptions }
       );
       text += fallback.text || "";
     }

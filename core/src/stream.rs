@@ -165,6 +165,12 @@ impl StreamStretcher {
         }
 
         let target_end = self.xc + sp + tail;
+        if !self.eof && in_len < target_end {
+            // Wait for a full block. Emitting a partial one puts the seam
+            // wherever the input happened to run out, which lands on an
+            // irregular grid and re-derives the pitch analysis early.
+            return false;
+        }
         let end = in_len.min(target_end); // input position to render up to
         let i0 = (self.xc - tail).max(0.0); // render so windows are warm at `xc`
         let i_end = end.ceil();

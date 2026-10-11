@@ -5,7 +5,9 @@
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
 <title>Record · Trim · Transcribe</title>
 <link rel="stylesheet" href="styles.css">
-<script src="https://cdn.jsdelivr.net/npm/lamejs@1.2.1/lame.min.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/lamejs@1.2.1/lame.min.js"
+        integrity="sha384-xuasJXVcyv3hZq0eYpelEkBC8l4yufatZXDsKuyCU2rqfhDCb+ftuE/mSfZAteiK"
+        crossorigin="anonymous"></script>
 <script type="importmap">
 {
   "imports": {
@@ -41,7 +43,9 @@
       </label>
       <button class="btn sm" id="refreshDevices" title="Request permission if needed, then relist audio devices">List devices</button>
       <span class="sep"></span>
-      <label class="btn file" id="loadLabel">Load audio<input type="file" id="fileInput" accept="audio/*" hidden></label>
+      <label class="chk" title="Use the browser's echo cancellation / noise suppression / auto gain. Off by default: they clip quiet word onsets and pump the noise floor."><input type="checkbox" id="voiceProc"> voice processing</label>
+      <span class="sep"></span>
+      <label class="btn file" id="loadLabel">Load audio<input type="file" id="fileInput" accept="audio/*,video/*" hidden></label>
       <span class="muted" id="fileMeta">No audio loaded</span>
       <span class="sep"></span>
       <button class="btn sm" id="saveBackup" title="Export this recording as WAV so you keep a copy">⬇ Save backup</button>
@@ -120,6 +124,22 @@
           <option value="onnx-community/whisper-small_timestamped">small (accurate)</option>
         </select>
       </label>
+      <label class="chk">lang
+        <select id="langSel" title="Force the language instead of auto-detecting per window">
+          <option value="" selected>auto</option>
+          <option value="en">English</option>
+          <option value="es">Spanish</option>
+          <option value="fr">French</option>
+          <option value="de">German</option>
+          <option value="it">Italian</option>
+          <option value="pt">Portuguese</option>
+          <option value="nl">Dutch</option>
+          <option value="ja">Japanese</option>
+          <option value="zh">Chinese</option>
+          <option value="ko">Korean</option>
+        </select>
+      </label>
+      <label class="chk" title="Use WebGPU when available (much faster); falls back to WASM"><input type="checkbox" id="webgpuChk"> WebGPU</label>
       <span class="muted" id="txStatus"></span>
     </div>
     <div class="progress"><div id="txProgress"></div></div>

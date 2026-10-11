@@ -85,6 +85,10 @@ main { max-width: 960px; margin: 0 auto; padding: 0.8rem 1rem 1.4rem; display: f
 #overview { display: block; width: 100%; cursor: pointer; background: #0a0d13; border-bottom: 1px solid var(--line); }
 .wave-main { position: relative; }
 #mainwave { display: block; width: 100%; cursor: crosshair; }
+/* Touch gestures on the canvases and the dial must not be claimed by the
+   browser for scrolling, or panning/split-dragging break and the speed dial
+   reads a pointercancel as a click. */
+#mainwave, #overview, .speed-dial { touch-action: none; }
 #playhead {
   position: absolute; top: 0; bottom: 0; width: 2px; background: var(--play);
   display: none; box-shadow: 0 0 8px var(--play); pointer-events: none; z-index: 6;
