@@ -39,18 +39,36 @@ export function backupName(sourceName) {
   return `${exportBaseName(sourceName)}-backup.wav`;
 }
 
-/** Clip export name, prefixed with the source so clips from different sources do not collide. */
-export function clipExportName(sourceName, clipName, format = "wav") {
-  const base = exportBaseName(sourceName);
-  const name = sanitizeName(clipName) || "clip";
-  return `${base}-${name}.${format}`;
+/** `HHMMSS` for a position in the recording (13:45 -> "001345"). */
+export function clockStamp(seconds) {
+  const total = Math.max(0, Math.floor(Number.isFinite(seconds) ? seconds : 0));
+  const p = (n) => String(n).padStart(2, "0");
+  return `${p(Math.floor(total / 3600))}${p(Math.floor((total % 3600) / 60))}${p(total % 60)}`;
 }
 
-/** Recording name as `YYYY-MM-DD HHMM`, which sorts chronologically. */
+/**
+ * Default clip name: `<source> - <nn> - <HHMMSS>`, where the stamp is the
+ * clip's start position in the recording. The source is part of the name, so
+ * the export filename below is used verbatim rather than prefixed again.
+ */
+export function clipName(sourceName, index, startSample, sampleRate) {
+  const base = exportBaseName(sourceName);
+  const nn = String(index + 1).padStart(2, "0");
+  const seconds = sampleRate > 0 ? startSample / sampleRate : 0;
+  return `${base} - ${nn} - ${clockStamp(seconds)}`;
+}
+
+/** Exported filename for a clip. The clip name already carries the source. */
+export function clipExportName(clipNameText, format = "wav") {
+  const name = sanitizeName(clipNameText) || "clip";
+  return `${name}.${format}`;
+}
+
+/** Recording name as `MMDDYYYY HHMM` (24-hour). */
 export function recordingName(date = new Date()) {
   const p = (n) => String(n).padStart(2, "0");
   return (
-    `${date.getFullYear()}-${p(date.getMonth() + 1)}-${p(date.getDate())} ` +
+    `${p(date.getMonth() + 1)}${p(date.getDate())}${date.getFullYear()} ` +
     `${p(date.getHours())}${p(date.getMinutes())}`
   );
 }

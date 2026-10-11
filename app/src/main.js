@@ -13,13 +13,14 @@ import { buildClips, splitLabels } from "./export/boundaries.js";
 import {
   backupName,
   clipExportName,
+  clipName,
   exportBaseName,
   recordingName,
   wholeExportName,
 } from "./util/filenames.js";
 import { CLICK_PX, SPEED_MAX, SPEED_MIN, clampSpeed, speedAfterDrag, speedFromDrag, stepSpeed } from "./ui/speed.js";
 import { zoomAnchor, zoomAround } from "./ui/view.js";
-import { applyGain, NORM_PEAK, NORM_RMS_DB, normalizeGain, peakOf } from "./audio/normalize.js";
+import { applyGain } from "./audio/normalize.js";
 import { cleanUp, cleanupActive, cleanupOptions, cleanupSummary } from "./audio/enhance.js";
 
 const $ = (id) => document.getElementById(id);
@@ -38,6 +39,12 @@ const state = {
   // new recording never overwrites an unrecovered one.
   sessionId: null,
 };
+
+// The last committed split list, so a split edit can be recorded in the history
+// as one undoable step (and a drag, which fires many times, as a single one).
+let lastSplits = [];
+// When the current recording started, so its name reflects the start time.
+let recStartDate = new Date();
 
 /** A short unique id for an autosave session. */
 function newSessionId() {
@@ -103,6 +110,16 @@ const waveform = new WaveformView({
   onSplitsChange: (splits, dragging) => {
     state.splits = splits.slice();
     $("splitInfo").textContent = `${splits.length} splits`;
+    if (!dragging) {
+      // A settled change is one undoable edit. Mid-drag calls leave the
+      // baseline alone, so dragging a split undoes as a single step.
+      const changed =
+        splits.length !== lastSplits.length || splits.some((v, i) => v !== lastSplits[i]);
+      if (changed) {
+        pushHistory({ kind: "splits", before: lastSplits.slice(), after: splits.slice() });
+        lastSplits = splits.slice();
+      }
+    }
     if (dragging) {
       // Mid-drag: labels only. Rebuilding the clip list (a whole-file export
       // map when baked) and the transcript scopes on every pointermove is what
@@ -336,6 +353,7 @@ function setSource(pcm, sampleRate, label, { autosave = true, saved = false, ses
   state.sampleRate = sampleRate;
   state.transcript = null;
   state.splits = [];
+  lastSplits = [];
   state.sourceName = label || "recording";
   state.sessionId = sessionId || newSessionId();
   // A new source invalidates the edit history.
@@ -570,6 +588,8 @@ $("recordBtn").addEventListener("click", async () => {
   // Persist chunks as they arrive so a crash mid-recording is recoverable.
   const sessionId = newSessionId();
   state.sessionId = sessionId;
+  // The recording is named for when it started, not when it stopped.
+  recStartDate = new Date();
   recorder.onChunk = (buffer, index) => {
     appendChunk(sessionId, index, buffer).catch(() => {});
   };
@@ -578,7 +598,7 @@ $("recordBtn").addEventListener("click", async () => {
       $("meterFill").style.width = Math.min(100, level * 140) + "%";
     }, state.inputDeviceId, $("voiceProc").checked);
     createSession(sessionId, {
-      name: recordingName(),
+      name: recordingName(recStartDate),
       sampleRate: audioContext().sampleRate,
       type: "audio/webm",
       live: true,
@@ -617,7 +637,7 @@ $("stopRecBtn").addEventListener("click", async () => {
   setRecordingUi(false);
   if (decoded) {
     // The live chunks are already the recovery copy; no snapshot needed.
-    setSource(decoded.pcm, decoded.sampleRate, recordingName(), {
+    setSource(decoded.pcm, decoded.sampleRate, recordingName(recStartDate), {
       autosave: false,
       sessionId,
     });
@@ -756,12 +776,23 @@ function pushHistory(entry) {
   history.redo.length = 0;
 }
 
+/** Restore a split list from the history and refresh everything showing it. */
+function applySplits(splits, message) {
+  // Set the baseline first, so the change `setSplits` reports is not recorded
+  // as a new edit.
+  lastSplits = splits.slice();
+  waveform.setSplits(splits);
+  $("saveStatus").textContent = message;
+}
+
 /** Step back one edit. Returns whether anything was undone. */
 async function undoEdit() {
   const entry = history.undo.pop();
   if (!entry) return false;
   if (entry.kind === "gain") {
     await swapSource(applyGain(state.pcm, 1 / entry.gain), "Normalize undone");
+  } else if (entry.kind === "splits") {
+    applySplits(entry.before, "Split edit undone");
   } else {
     await swapSource(entry.before, "Clean up undone");
   }
@@ -775,6 +806,8 @@ async function redoEdit() {
   if (!entry) return false;
   if (entry.kind === "gain") {
     await swapSource(applyGain(state.pcm, entry.gain), "Normalize redone");
+  } else if (entry.kind === "splits") {
+    applySplits(entry.after, "Split edit redone");
   } else {
     await swapSource(entry.after, "Clean up redone");
   }
@@ -801,25 +834,6 @@ async function swapSource(newPcm, message) {
   $("saveStatus").textContent = message;
 }
 
-$("normBtn").addEventListener("click", async () => {
-  if (!state.pcm || state.pcm.length === 0) return;
-  const mode = $("normMode") ? $("normMode").value : "peak";
-  const gain = normalizeGain(state.pcm, mode);
-  if (gain === null) {
-    $("saveStatus").textContent = "No signal to normalize";
-    return;
-  }
-  const before = 20 * Math.log10(peakOf(state.pcm));
-  const out = applyGain(state.pcm, gain);
-  pushHistory({ kind: "gain", gain });
-  await swapSource(
-    out,
-    mode === "rms"
-      ? `Normalized to ${NORM_RMS_DB} dBFS RMS (peak was ${before.toFixed(2)} dB)`
-      : `Normalized: peak ${before.toFixed(2)} dB → ${(20 * Math.log10(NORM_PEAK)).toFixed(2)} dB`
-  );
-});
-
 // Ctrl+Z / Ctrl+Y (and Cmd on macOS) walk the edit history.
 document.addEventListener("keydown", (e) => {
   if (!(e.ctrlKey || e.metaKey)) return;
@@ -842,6 +856,8 @@ function currentCleanupOptions() {
     denoise: $("cleanDenoise").checked,
     consonant: $("cleanConsonant").checked,
     consonantDb: Number($("cleanConsonantDb").value),
+    normalize: $("cleanNormalize").checked,
+    normalizeMode: $("normMode").value,
     loudness: $("cleanLoudness").checked,
   });
 }
@@ -851,7 +867,10 @@ function showCleanOptions(open) {
   const block = $("cleanOptions");
   if (!block) return;
   block.hidden = !open;
-  $("cleanUpBtn").setAttribute("aria-expanded", open ? "true" : "false");
+  const btn = $("cleanUpBtn");
+  btn.setAttribute("aria-expanded", open ? "true" : "false");
+  // Same visual language as the skip-silence toggle: green while the panel is open.
+  btn.setAttribute("aria-pressed", open ? "true" : "false");
   if (open) {
     // Preload RNNoise so the first run does not pause on the download, and
     // disable the toggle with a reason if it cannot load at all.
@@ -888,18 +907,23 @@ $("cleanRun").addEventListener("click", async () => {
   await withBusy("Cleaning up…", async () => {
     try {
       const before = state.pcm;
-      const { pcm, steps } = await cleanUp(before, state.sampleRate, opts, (f) => {
+      const { pcm, steps, gain } = await cleanUp(before, state.sampleRate, opts, (f) => {
         $("busyText").textContent = `Denoising… ${Math.round(f * 100)}%`;
       });
       if (pcm === before) {
         $("saveStatus").textContent = cleanupSummary(steps);
         return;
       }
-      // A clean-up cannot be inverted, so the history keeps the previous
-      // samples. When the recording is too long to hold a second copy the
-      // history is dropped instead, because its entries would no longer chain.
       let suffix = "";
-      if (before.length <= CLEANUP_UNDO_MAX_SAMPLES) {
+      if (gain !== null) {
+        // Normalize was the only stage, so the whole run is one multiplier:
+        // exact and free to undo, with no second buffer.
+        pushHistory({ kind: "gain", gain });
+      } else if (before.length <= CLEANUP_UNDO_MAX_SAMPLES) {
+        // Otherwise the chain cannot be inverted, so the history keeps the
+        // previous samples. When the recording is too long to hold a second
+        // copy the history is dropped instead, because its entries would no
+        // longer chain.
         pushHistory({ kind: "pcm", before, after: pcm });
       } else {
         clearHistory();
@@ -1315,7 +1339,9 @@ function renderClipList() {
   const names = currentClipNames();
   list.innerHTML = "";
   if (!state.pcm || state.splits.length === 0) {
-    list.innerHTML = `<span class="muted">No splits — the whole file exports as one clip. Add splits in step 2.</span>`;
+    // Nothing to clip: shade the clips export rather than explaining why.
+    $("exportClips").disabled = true;
+    $("exportClips").title = "Add a split in step 2 first";
     return;
   }
   // Display baked clip lengths without rendering audio: one position map can map
@@ -1346,19 +1372,22 @@ function renderClipList() {
       const end = mapper ? mapper.mapSample(c.end) : c.end;
       const dur = Math.max(0, end - start) / state.sampleRate;
       row.innerHTML = `<span class="n">${i + 1}</span>
-        <input type="text" value="clip-${String(i + 1).padStart(2, "0")}">
+        <input type="text">
         <span class="d">${dur.toFixed(2)}s</span>
         <button title="Export this clip">⬇</button>`;
       const nameField = row.querySelector("input");
-      if (names[i] != null && names[i] !== "") nameField.value = names[i];
+      nameField.value =
+        names[i] != null && names[i] !== ""
+          ? names[i]
+          : clipName(state.sourceName, i, c.start, state.sampleRate);
     row.querySelector("button").addEventListener("click", async () => {
-        const name = nameField.value || `clip-${i + 1}`;
+        const name = nameField.value || clipName(state.sourceName, i, c.start, state.sampleRate);
         const fmtSel = $("exportFormat").value;
         await withBusy(`Exporting ${name}…`, async () => {
           try {
             const range = mapClipForExport(c);
             if (range.end > range.start) {
-              exportSlice(range.pcm, state.sampleRate, range.start, range.end, fmtSel, clipExportName(state.sourceName, name, fmtSel));
+              exportSlice(range.pcm, state.sampleRate, range.start, range.end, fmtSel, clipExportName(name, fmtSel));
               $("exportStatus").textContent = `Exported ${name}.${fmtSel}`;
             } else {
               $("exportStatus").textContent = "Clip is empty after baking — nothing to export";
@@ -1532,7 +1561,7 @@ $("exportClips").addEventListener("click", async () => {
       mapper = makeExportMap();
       const clips = buildClips(state.splits, state.pcm.length);
       ranges = clips.map((clip, i) => ({
-        name: (names[i] || `clip-${String(i + 1).padStart(2, "0")}`).trim(),
+        name: (names[i] || clipName(state.sourceName, i, clip.start, state.sampleRate)).trim(),
         pcm: src.pcm,
         start: mapper ? mapper.mapSample(clip.start) : clip.start,
         end: mapper ? mapper.mapSample(clip.end) : clip.end,
@@ -1555,7 +1584,7 @@ $("exportClips").addEventListener("click", async () => {
             range.start,
             range.end,
             fmtSel,
-            clipExportName(state.sourceName, range.name, fmtSel)
+            clipExportName(range.name, fmtSel)
           );
           count++;
         }

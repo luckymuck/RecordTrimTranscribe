@@ -78,15 +78,9 @@
       <span class="sep"></span>
       <button class="btn sm" id="addSplit">+split</button>
       <button class="btn sm" id="clearSplits">clear</button>
-      <button class="btn sm" id="normBtn" title="Normalize the recording's level">Norm</button>
-      <select id="normMode" class="sm-select" aria-label="Normalize mode"
-        title="peak: scale the loudest sample to −1 dBFS. rms: scale so the average level hits −20 dBFS, keeping the peak under −1 dBFS.">
-        <option value="peak" selected>peak</option>
-        <option value="rms">rms</option>
-      </select>
       <span class="sep"></span>
-      <button class="btn sm" id="cleanUpBtn" aria-expanded="false"
-        title="Filter rumble, denoise with RNNoise, boost consonants and limit peaks — applied to the recording">clean up</button>
+      <button class="btn sm toggle" id="cleanUpBtn" aria-expanded="false" aria-pressed="false"
+        title="Filter rumble, denoise with RNNoise, boost consonants, normalize and limit peaks — applied to the recording">clean up</button>
       <span class="muted" id="splitInfo">0 splits</span>
       <span class="muted time" id="cursorTime">—</span>
     </div>
@@ -97,6 +91,13 @@
       <label class="chk">strength
         <input type="range" id="cleanConsonantDb" min="0" max="6" step="1" value="3" aria-label="Consonant boost strength in dB">
         <span class="muted" id="cleanConsonantVal">3 dB</span>
+      </label>
+      <label class="chk" title="Set the recording's level: peak scales the loudest sample to −1 dBFS; rms scales so the average level hits −20 dBFS, keeping the peak under −1 dBFS."><input type="checkbox" id="cleanNormalize"> normalize</label>
+      <label class="chk">mode
+        <select id="normMode" class="sm-select" aria-label="Normalize mode">
+          <option value="peak" selected>peak</option>
+          <option value="rms">rms</option>
+        </select>
       </label>
       <label class="chk" title="Peak limiter at −1 dBFS so nothing clips after processing"><input type="checkbox" id="cleanLoudness"> limit peaks</label>
       <button class="btn sm" id="cleanRun">Run clean-up</button>

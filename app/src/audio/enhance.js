@@ -1,11 +1,13 @@
 // Clean-up chain: rumble filter (S-5), denoise (S-5), consonant boost (S-4),
-// and a soft limiter (S-13). Runs on the loaded source before it is stretched,
-// because stretching exaggerates noise and breath.
+// normalize (REC-12), and a soft limiter (S-13). Runs on the loaded source
+// before it is stretched, because stretching exaggerates noise and breath.
 //
 // Order matters: denoise before the consonant boost so the boost cannot lift
-// the noise floor, and the limiter last so it catches everything before it.
+// the noise floor, normalize before the limiter (the limiter is the final
+// guard), and the limiter last so it catches everything before it.
 
 import { consonantBoost, highpassFilter, softLimiter } from "../core/dsp.js";
+import { applyGain, NORM_RMS_DB, normalizeGain } from "./normalize.js";
 import { denoise } from "./denoise.js";
 
 export const RUMBLE_CUTOFF_HZ = 80;
@@ -18,6 +20,8 @@ export const DEFAULT_CLEANUP = {
   denoise: true,
   consonant: false,
   consonantDb: 3,
+  normalize: false,
+  normalizeMode: "peak",
   loudness: false,
 };
 
@@ -26,13 +30,14 @@ export function cleanupOptions(partial) {
   const o = { ...DEFAULT_CLEANUP, ...(partial || {}) };
   const db = Number(o.consonantDb);
   o.consonantDb = Math.max(0, Math.min(CONSONANT_MAX_DB, Number.isFinite(db) ? db : 0));
+  o.normalizeMode = o.normalizeMode === "rms" ? "rms" : "peak";
   return o;
 }
 
 /** True when at least one stage is selected. */
 export function cleanupActive(partial) {
   const o = cleanupOptions(partial);
-  return o.rumble || o.denoise || o.consonant || o.loudness;
+  return o.rumble || o.denoise || o.consonant || o.normalize || o.loudness;
 }
 
 /** Human-readable summary of what a run did. */
@@ -43,8 +48,10 @@ export function cleanupSummary(steps) {
 /**
  * Run the selected stages over `pcm`.
  *
- * Returns `{ pcm, steps }`. `pcm` is the input unchanged when nothing is
- * selected, so the caller can compare identity and skip the swap.
+ * Returns `{ pcm, steps, gain }`. `pcm` is the input unchanged when nothing is
+ * selected, so the caller can compare identity and skip the swap. `gain` is set
+ * only when normalize is the sole stage: the whole chain is then one
+ * multiplier, which the caller can undo exactly and without keeping a copy.
  */
 export async function cleanUp(pcm, sampleRate, partial, onProgress) {
   const o = cleanupOptions(partial);
@@ -64,9 +71,19 @@ export async function cleanUp(pcm, sampleRate, partial, onProgress) {
     out = consonantBoost(out, sampleRate, CONSONANT_CORNER_HZ, o.consonantDb, amount);
     steps.push(`consonants +${o.consonantDb} dB`);
   }
+  if (o.normalize) {
+    const gain = normalizeGain(out, o.normalizeMode);
+    if (gain !== null) {
+      out = applyGain(out, gain);
+      steps.push(
+        o.normalizeMode === "rms" ? `normalized to ${NORM_RMS_DB} dBFS RMS` : "normalized"
+      );
+    }
+  }
   if (o.loudness) {
     out = softLimiter(out, sampleRate, LIMIT_CEILING_DB);
     steps.push(`limited to ${LIMIT_CEILING_DB} dBFS`);
   }
-  return { pcm: out, steps };
+  const gainOnly = o.normalize && !o.rumble && !o.denoise && !o.consonant && !o.loudness;
+  return { pcm: out, steps, gain: gainOnly ? normalizeGain(pcm, o.normalizeMode) : null };
 }

@@ -9,20 +9,26 @@ A local-first audio tool with four capabilities:
    `*_timestamped` ONNX exports so clickable word timestamps work.
 4. **Trim / split** into separate clips and export as WAV or MP3.
 5. **Clean up** a recording before it is stretched: rumble filter, RNNoise
-   denoise, consonant boost, and a peak limiter.
+   denoise, consonant boost, normalize, and a peak limiter.
 
 Shortcuts & editing:
 - **Space** toggles play/stop at the playhead, as does the transport button.
-- **Ctrl+Z** undoes the last edit (normalize or clean up) and **Ctrl+Y** redoes
-  it; on macOS **Cmd+Z** / **Cmd+Shift+Z** work too.
+- **Ctrl+Z** undoes the last edit and **Ctrl+Y** redoes it; on macOS **Cmd+Z** /
+  **Cmd+Shift+Z** work too. Edits include adding, moving, deleting and clearing
+  splits, not just clean up.
 - **Ctrl+click** on the waveform adds a split at that spot.
-- **Right-click** a split line to delete it.
+- **Right-click** a split line to delete it, or click the small bin at the lower
+  left of the line.
 - With the waveform focused: **arrows** nudge the cursor (**Shift** = ten steps),
   **Home/End** jump to the ends, **Enter** (or **[**) adds a split at the cursor
   and **]** removes the nearest one.
 - Each split is labelled on the waveform with its time and clip number
   (`3:15-01`), optionally followed by the first words of that clip's transcript
   (`3:15-01-Good morning this is`).
+- Clips are named `<source> - <nn> - <HHMMSS>` from the clip's start position,
+  e.g. `talk - 02 - 001345`, and each name stays editable in step 3.
+- A recording's default name is `MMDDYYYY HHMM` from when it **started**; a
+  loaded file keeps its filename with the extension stripped.
 - Step 1 lets you pick the recording **input** and playback **output** devices.
   Use **List devices** to grant microphone permission when labels are unavailable;
   browsers hide device identities until permission is granted.
@@ -191,14 +197,18 @@ and then closes the panel. The stages are:
   jsdelivr build as a fallback, so the desktop build stays offline.
 - **consonant boost** — a high-shelf above 2 kHz with a 0–6 dB strength control
   plus light high-band compression, so soft consonants sit closer to the vowels.
+- **normalize** — sets the level, either to a −1 dBFS peak or to −20 dBFS RMS
+  (the mode selector beside it), and runs before the limiter so the limiter is
+  still the final guard.
 - **limit peaks** — a −1 dBFS peak limiter, also applied to speed-baked exports
   after the DSP so a stretched render cannot clip.
 
 **Ctrl+Z** steps back through edits and **Ctrl+Y** forward again (Cmd on macOS).
-A normalize step is stored as its gain, which is exact and free; a clean-up step
-cannot be inverted, so it stores the previous samples — a full copy, so clean-up
-steps are only undoable for recordings under about three minutes, and the status
-line says when one was too long.
+When normalize is the only stage selected the run is a single multiplier, so it
+is stored as its gain — exact and free. Any other clean-up cannot be inverted, so
+it stores the previous samples, a full copy: those steps are only undoable for
+recordings under about three minutes, and the status line says when one was too
+long. Split edits are stored as the two lists, which costs nothing.
 
 ### Known limitations
 

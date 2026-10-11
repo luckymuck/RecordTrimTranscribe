@@ -38,6 +38,13 @@ export class WaveformView {
     this.labelsEl.className = "split-label-layer";
     (playhead.parentElement || this.main.parentElement).appendChild(this.labelsEl);
 
+    // Delete controls live in their own layer: the split lines are canvas-drawn
+    // and cannot be clicked, and this layer spans the waveform so the buttons
+    // can sit at the bottom.
+    this.toolsEl = document.createElement("div");
+    this.toolsEl.className = "split-tools-layer";
+    (playhead.parentElement || this.main.parentElement).appendChild(this.toolsEl);
+
     this._measureCtx = document.createElement("canvas").getContext("2d");
 
     this._bind();
@@ -222,6 +229,7 @@ export class WaveformView {
     this._drawOverview();
     this._drawMain();
     this._drawLabels();
+    this._drawSplitTools();
     this.drawPlayhead();
   }
 
@@ -434,6 +442,46 @@ export class WaveformView {
       label.style.transform = flip ? "translateX(-100%)" : "";
       label.style.left = x + "px";
       if (!label.isConnected) this.labelsEl.appendChild(label);
+    }
+    for (let i = used; i < pool.length; i++) {
+      if (pool[i].isConnected) pool[i].remove();
+    }
+  }
+
+  /**
+   * A small delete button at the lower left of each split line. The pool is
+   * reused and off-screen splits are culled, like the labels.
+   */
+  _drawSplitTools() {
+    const pool = (this._toolPool = this._toolPool || []);
+    if (!this.pcm || this.splits.length === 0) {
+      for (const el of pool) if (el.isConnected) el.remove();
+      return;
+    }
+    const width = this.main.clientWidth;
+    let used = 0;
+    for (let i = 0; i < this.splits.length; i++) {
+      const sx = this.sampleToX(this.splits[i]);
+      if (sx < 0 || sx > width) continue;
+      let btn = pool[used];
+      if (!btn) {
+        btn = document.createElement("button");
+        btn.type = "button";
+        btn.className = "split-trash";
+        btn.title = "Delete this split";
+        btn.setAttribute("aria-label", "Delete this split");
+        btn.innerHTML =
+          '<svg viewBox="0 0 16 16" fill="currentColor" aria-hidden="true"><path d="M11 1.75V3h2.25a.75.75 0 0 1 0 1.5H2.75a.75.75 0 0 1 0-1.5H5V1.75C5 .784 5.784 0 6.75 0h2.5C10.216 0 11 .784 11 1.75ZM4.496 6.675l.66 6.6a.25.25 0 0 0 .249.225h5.19a.25.25 0 0 0 .249-.225l.66-6.6a.75.75 0 0 1 1.492.149l-.66 6.6A1.748 1.748 0 0 1 10.595 15h-5.19a1.75 1.75 0 0 1-1.741-1.575l-.66-6.6a.75.75 0 1 1 1.492-.15ZM6.5 1.75V3h3V1.75a.25.25 0 0 0-.25-.25h-2.5a.25.25 0 0 0-.25.25Z"/></svg>';
+        btn.addEventListener("click", () => {
+          const index = this.splits.indexOf(Number(btn.dataset.sample));
+          if (index >= 0) this.removeSplit(index);
+        });
+        pool.push(btn);
+      }
+      used++;
+      btn.dataset.sample = String(this.splits[i]);
+      btn.style.left = sx + "px";
+      if (!btn.isConnected) this.toolsEl.appendChild(btn);
     }
     for (let i = used; i < pool.length; i++) {
       if (pool[i].isConnected) pool[i].remove();
@@ -658,6 +706,14 @@ export class WaveformView {
     const n = this.pcm.length;
     this.viewLen = Math.max(64, Math.min(n, this.viewLen));
     this.viewStart = Math.max(0, Math.min(n - this.viewLen, this.viewStart));
+  }
+
+  /** Replace the split list wholesale (used by undo/redo). */
+  setSplits(splits) {
+    this._hideCtxMenu();
+    this.splits = (splits || []).map((s) => Math.round(s)).sort((a, b) => a - b);
+    this.onSplitsChange(this.splits);
+    this.draw();
   }
 
   addSplit(sample) {

@@ -4,6 +4,7 @@ import fs from "node:fs";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { initDsp } from "../src/core/dsp.js";
+import { NORM_PEAK } from "../src/audio/normalize.js";
 import {
   cleanUp,
   cleanupActive,
@@ -49,10 +50,42 @@ test("cleanupOptions clamps the consonant strength", () => {
 });
 
 test("cleanupActive reflects the selected stages", () => {
-  const none = { rumble: false, denoise: false, consonant: false, loudness: false };
+  const none = { rumble: false, denoise: false, consonant: false, normalize: false, loudness: false };
   assert.equal(cleanupActive(none), false);
   assert.equal(cleanupActive({ ...none, loudness: true }), true);
+  assert.equal(cleanupActive({ ...none, normalize: true }), true);
   assert.equal(cleanupActive({ ...none, consonant: true, consonantDb: 0 }), true);
+});
+
+test("cleanUp normalizes as part of the chain", async () => {
+  const x = tone(300, 0.5, 48000, 0.2);
+  const { pcm, steps } = await cleanUp(x, 48000, {
+    rumble: false,
+    denoise: false,
+    consonant: false,
+    normalize: true,
+    normalizeMode: "peak",
+    loudness: false,
+  });
+  assert.ok(steps.includes("normalized"), `steps: ${steps}`);
+  const peak = pcm.reduce((m, v) => Math.max(m, Math.abs(v)), 0);
+  assert.ok(Math.abs(peak - NORM_PEAK) < 1e-3, `peak ${peak}, expected ${NORM_PEAK}`);
+});
+
+test("cleanUp reports a gain only when normalize is the sole stage", async () => {
+  const x = tone(300, 0.5, 48000, 0.2);
+  const only = {
+    rumble: false,
+    denoise: false,
+    consonant: false,
+    normalize: true,
+    normalizeMode: "peak",
+    loudness: false,
+  };
+  const a = await cleanUp(x, 48000, only);
+  assert.ok(a.gain !== null && a.gain > 1, `expected a gain, got ${a.gain}`);
+  const b = await cleanUp(x, 48000, { ...only, rumble: true });
+  assert.equal(b.gain, null, "a mixed chain cannot be undone by a single gain");
 });
 
 test("cleanUp returns the input untouched when nothing is selected", async () => {
