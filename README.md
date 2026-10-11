@@ -12,7 +12,9 @@ A local-first audio tool with four capabilities:
    denoise, consonant boost, and a peak limiter.
 
 Shortcuts & editing:
-- **Space** toggles play/stop at the playhead.
+- **Space** toggles play/stop at the playhead, as does the transport button.
+- **Ctrl+Z** undoes the last edit (normalize or clean up) and **Ctrl+Y** redoes
+  it; on macOS **Cmd+Z** / **Cmd+Shift+Z** work too.
 - **Ctrl+click** on the waveform adds a split at that spot.
 - **Right-click** a split line to delete it.
 - With the waveform focused: **arrows** nudge the cursor (**Shift** = ten steps),
@@ -164,8 +166,8 @@ through verbatim (`hybrid.rs`).
 
 Speed control lives under the waveform: drag the speed readout (e.g. `1.00×`) to
 the left/right to change it, click it to step up 0.25×, or double-click to reset
-to 1.0×. The range is **1.00×–4.00×**; there is no slow-down. Play/stop use
-icon-only buttons; Space is still play/stop.
+to 1.0×. The range is **1.00×–4.00×**; there is no slow-down. The transport is a
+single button: play while stopped, stop while playing. Space does the same.
 
 **Skip silence.** The `skip silence` toggle next to the speed readout skips anysilence longer than 0.25 s, leaving a 0.2 s pause split evenly across the two
 edges of the gap so the words it separates are not clipped. That pause is
@@ -176,9 +178,10 @@ speed-baked export the gaps are cut down and rendered out, and a `SkipBakedMap`
 keeps clip boundaries aligned with what was actually written. Pauses shorter than
 the threshold are kept as-is.
 
-**Clean up.** The `clean up` button runs the selected stages over the recording
-before anything is stretched, because stretching exaggerates noise and breath.
-The `options` button reveals them:
+**Clean up.** The `clean up` button opens a small options panel and a
+**Run clean-up** button; running it applies the selected stages to the recording
+before anything is stretched, because stretching exaggerates noise and breath,
+and then closes the panel. The stages are:
 
 - **rumble filter** — a 80 Hz high-pass that removes rumble, hum and handling
   noise (on by default).
@@ -191,10 +194,11 @@ The `options` button reveals them:
 - **limit peaks** — a −1 dBFS peak limiter, also applied to speed-baked exports
   after the DSP so a stretched render cannot clip.
 
-`undo` reverts the last processing step, whether that was a normalize or a clean
-up. Normalize undo is exact and free (it stores the gain); clean-up undo keeps
-the previous samples, which is a full copy, so it is only offered for recordings
-under about three minutes.
+**Ctrl+Z** steps back through edits and **Ctrl+Y** forward again (Cmd on macOS).
+A normalize step is stored as its gain, which is exact and free; a clean-up step
+cannot be inverted, so it stores the previous samples — a full copy, so clean-up
+steps are only undoable for recordings under about three minutes, and the status
+line says when one was too long.
 
 ### Known limitations
 

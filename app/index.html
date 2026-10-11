@@ -65,8 +65,7 @@
       </div>
     </div>
     <div class="row wave-tools wave-controls">
-      <button id="playBtn" class="btn icon-btn" title="Play / pause (Space)">▶</button>
-      <button id="stopPlayBtn" class="btn icon-btn" disabled title="Stop">■</button>
+      <button id="playBtn" class="btn icon-btn" title="Play (Space)" aria-label="Play">▶</button>
       <span class="sep"></span>
       <span id="speed" class="speed-dial" tabindex="0" role="slider" aria-label="Playback speed" aria-valuemin="1" aria-valuemax="4" aria-valuenow="1.00" aria-valuetext="1.00 times"
         title="Drag left / right to change speed (1.00×–4.00×, no slow-down) · click to add 0.25× · double-click to reset">1.00×</span>
@@ -76,7 +75,6 @@
       <button class="btn sm" id="zoomIn">＋</button>
       <button class="btn sm" id="zoomOut">－</button>
       <button class="btn sm" id="zoomAll">All</button>
-      <span class="muted" id="zoomLabel">1×</span>
       <span class="sep"></span>
       <button class="btn sm" id="addSplit">+split</button>
       <button class="btn sm" id="clearSplits">clear</button>
@@ -87,9 +85,8 @@
         <option value="rms">rms</option>
       </select>
       <span class="sep"></span>
-      <button class="btn sm" id="cleanUpBtn" title="Filter rumble, denoise with RNNoise, boost consonants and limit peaks — applied to the recording">clean up</button>
-      <button class="btn sm" id="cleanUpOptsBtn" aria-expanded="false" title="Choose which clean-up stages run">options</button>
-      <button class="btn sm" id="normUndo" disabled title="Undo the last processing step (normalize or clean up)">undo</button>
+      <button class="btn sm" id="cleanUpBtn" aria-expanded="false"
+        title="Filter rumble, denoise with RNNoise, boost consonants and limit peaks — applied to the recording">clean up</button>
       <span class="muted" id="splitInfo">0 splits</span>
       <span class="muted time" id="cursorTime">—</span>
     </div>
@@ -102,8 +99,10 @@
         <span class="muted" id="cleanConsonantVal">3 dB</span>
       </label>
       <label class="chk" title="Peak limiter at −1 dBFS so nothing clips after processing"><input type="checkbox" id="cleanLoudness"> limit peaks</label>
+      <button class="btn sm primary" id="cleanRun">Run clean-up</button>
+      <button class="btn sm" id="cleanClose">Close</button>
     </div>
-    <p class="hint">Scroll to zoom · drag to scroll · click to seek · Ctrl+click to split at that spot · drag a split line to move it · with the waveform focused: arrows move the cursor, Enter adds a split at it</p>
+    <p class="hint">Scroll to zoom · drag to scroll · click to seek · Ctrl+click to split at that spot · drag a split line to move it · with the waveform focused: arrows move the cursor, Enter adds a split at it · Ctrl+Z / Ctrl+Y undo and redo</p>
   </section>
 
   <!-- 3. Export -->

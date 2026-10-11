@@ -114,10 +114,18 @@ const waveform = new WaveformView({
     updateSplitLabels();
     renderTranscriptScopes();
   },
-  onViewChange: (label) => {
-    $("zoomLabel").textContent = label;
-  },
+  onViewChange: () => {},
 });
+
+/** One transport button: play while stopped, stop while playing. */
+function setPlayButton(playing) {
+  const btn = $("playBtn");
+  if (!btn) return;
+  btn.textContent = playing ? "■" : "▶";
+  btn.title = playing ? "Stop (Space)" : "Play (Space)";
+  btn.setAttribute("aria-label", playing ? "Stop" : "Play");
+  btn.disabled = !state.pcm;
+}
 
 const player = new Player({
   onPosition: (sample) => {
@@ -125,10 +133,7 @@ const player = new Player({
     waveform.setPlayhead(sample);
     $("cursorTime").textContent = fmt(sample);
   },
-  onEnd: () => {
-    $("playBtn").disabled = false;
-    $("stopPlayBtn").disabled = true;
-  },
+  onEnd: () => setPlayButton(false),
 });
 
 function fmt(sample) {
@@ -333,10 +338,8 @@ function setSource(pcm, sampleRate, label, { autosave = true, saved = false, ses
   state.splits = [];
   state.sourceName = label || "recording";
   state.sessionId = sessionId || newSessionId();
-  // A new source invalidates any pending undo (normalize gain or clean-up copy).
-  normalizeUndo = null;
-  cleanupUndo = null;
-  updateUndoButton();
+  // A new source invalidates the edit history.
+  clearHistory();
   // Play should start at the beginning of the new source, not wherever the
   // previous one was left.
   state.cursorSample = 0;
@@ -357,8 +360,7 @@ function setSource(pcm, sampleRate, label, { autosave = true, saved = false, ses
   $("transcript").innerHTML = "";
   $("txActions").style.display = "none";
   $("cursorTime").textContent = "—";
-  $("playBtn").disabled = false;
-  $("stopPlayBtn").disabled = true;
+  setPlayButton(false);
 }
 
 // ── Devices ───────────────────────────────────────────────────────────────────
@@ -518,8 +520,9 @@ function updateSplitLabels() {
 
 // ── Recording ────────────────────────────────────────────────────────────────
 function setRecordingUi(active) {
-  $("playBtn").disabled = active ? true : !state.pcm;
-  $("stopPlayBtn").disabled = true;
+  setPlayButton(false);
+  // While capturing, the transport is unavailable.
+  if (active) $("playBtn").disabled = true;
   $("fileInput").disabled = active;
   $("loadLabel").classList.toggle("is-disabled", active);
   // Avoid transcribing old audio while the mic is capturing.
@@ -669,14 +672,10 @@ function zoomBy(factor) {
   waveform.viewLen = view.viewLen;
   waveform._clampView();
   waveform.draw();
-  $("zoomLabel").textContent = waveform._zoomLabel();
 }
 $("zoomIn").addEventListener("click", () => zoomBy(0.7));
 $("zoomOut").addEventListener("click", () => zoomBy(1.4));
-$("zoomAll").addEventListener("click", () => {
-  waveform.resetZoom();
-  $("zoomLabel").textContent = waveform._zoomLabel();
-});
+$("zoomAll").addEventListener("click", () => waveform.resetZoom());
 $("addSplit").addEventListener("click", () => {
   if (!state.pcm) return;
   waveform.addSplit(state.cursorSample);
@@ -737,14 +736,51 @@ $("clearSplits").addEventListener("click", () => waveform.clearSplits());
 }
 
 // ── Normalize and clean up ──────────────────────────────────────────────────
-// One undo slot shared by both. Normalize undo is exact and free: normalizing
-// only multiplies, so applying 1/gain in float32 restores the original samples.
-// Clean up is a chain of filters and cannot be inverted, so its undo keeps the
-// previous samples -- a full copy, offered only for recordings short enough
-// that doubling the buffer is safe.
-let normalizeUndo = null;
-let cleanupUndo = null;
+// Edits go into a history so Ctrl+Z / Ctrl+Y can walk back and forward. A
+// normalize step is stored as its gain -- exact and free, since applying
+// 1/gain in float32 restores the samples. A clean-up step is a chain of
+// filters and cannot be inverted, so it stores the previous samples: a full
+// copy, kept only for recordings short enough to hold one more buffer.
 const CLEANUP_UNDO_MAX_SAMPLES = 8 * 1024 * 1024; // ~3 min at 48 kHz (32 MB)
+const HISTORY_MAX = 20;
+const history = { undo: [], redo: [] };
+
+function clearHistory() {
+  history.undo.length = 0;
+  history.redo.length = 0;
+}
+
+function pushHistory(entry) {
+  history.undo.push(entry);
+  if (history.undo.length > HISTORY_MAX) history.undo.shift();
+  history.redo.length = 0;
+}
+
+/** Step back one edit. Returns whether anything was undone. */
+async function undoEdit() {
+  const entry = history.undo.pop();
+  if (!entry) return false;
+  if (entry.kind === "gain") {
+    await swapSource(applyGain(state.pcm, 1 / entry.gain), "Normalize undone");
+  } else {
+    await swapSource(entry.before, "Clean up undone");
+  }
+  history.redo.push(entry);
+  return true;
+}
+
+/** Step forward one edit. Returns whether anything was redone. */
+async function redoEdit() {
+  const entry = history.redo.pop();
+  if (!entry) return false;
+  if (entry.kind === "gain") {
+    await swapSource(applyGain(state.pcm, entry.gain), "Normalize redone");
+  } else {
+    await swapSource(entry.after, "Clean up redone");
+  }
+  history.undo.push(entry);
+  return true;
+}
 
 /** Swap in new PCM for the current source and re-settle everything downstream. */
 async function swapSource(newPcm, message) {
@@ -760,27 +796,9 @@ async function swapSource(newPcm, message) {
   if (wasPlaying) {
     await audioContext().resume();
     player.play(state.cursorSample, currentSpeed());
-    $("playBtn").disabled = true;
-    $("stopPlayBtn").disabled = false;
+    setPlayButton(true);
   }
   $("saveStatus").textContent = message;
-}
-
-function updateUndoButton() {
-  const btn = $("normUndo");
-  if (btn) btn.disabled = !normalizeUndo && !cleanupUndo;
-}
-
-function setNormalizeUndo(gain) {
-  normalizeUndo = gain === null ? null : { gain };
-  if (normalizeUndo) cleanupUndo = null;
-  updateUndoButton();
-}
-
-function setCleanupUndo(pcm) {
-  cleanupUndo = pcm && pcm.length <= CLEANUP_UNDO_MAX_SAMPLES ? pcm : null;
-  if (cleanupUndo) normalizeUndo = null;
-  updateUndoButton();
 }
 
 $("normBtn").addEventListener("click", async () => {
@@ -793,7 +811,7 @@ $("normBtn").addEventListener("click", async () => {
   }
   const before = 20 * Math.log10(peakOf(state.pcm));
   const out = applyGain(state.pcm, gain);
-  setNormalizeUndo(gain);
+  pushHistory({ kind: "gain", gain });
   await swapSource(
     out,
     mode === "rms"
@@ -802,21 +820,19 @@ $("normBtn").addEventListener("click", async () => {
   );
 });
 
-$("normUndo").addEventListener("click", async () => {
-  if (!state.pcm) return;
-  if (cleanupUndo) {
-    const prev = cleanupUndo;
-    cleanupUndo = null;
-    normalizeUndo = null;
-    updateUndoButton();
-    await swapSource(prev, "Clean up undone");
-    return;
+// Ctrl+Z / Ctrl+Y (and Cmd on macOS) walk the edit history.
+document.addEventListener("keydown", (e) => {
+  if (!(e.ctrlKey || e.metaKey)) return;
+  const t = e.target;
+  if (t && ["INPUT", "TEXTAREA", "SELECT"].includes(t.tagName)) return;
+  const key = (e.key || "").toLowerCase();
+  if (key === "z" && !e.shiftKey) {
+    e.preventDefault();
+    undoEdit();
+  } else if (key === "y" || (key === "z" && e.shiftKey)) {
+    e.preventDefault();
+    redoEdit();
   }
-  if (!normalizeUndo) return;
-  const { gain } = normalizeUndo;
-  normalizeUndo = null;
-  updateUndoButton();
-  await swapSource(applyGain(state.pcm, 1 / gain), "Normalize undone");
 });
 
 /** The clean-up options as selected in the UI. */
@@ -830,13 +846,14 @@ function currentCleanupOptions() {
   });
 }
 
-$("cleanUpOptsBtn").addEventListener("click", () => {
+/** Show or hide the clean-up options panel. */
+function showCleanOptions(open) {
   const block = $("cleanOptions");
-  const open = block.hidden;
+  if (!block) return;
   block.hidden = !open;
-  $("cleanUpOptsBtn").setAttribute("aria-expanded", open ? "true" : "false");
+  $("cleanUpBtn").setAttribute("aria-expanded", open ? "true" : "false");
   if (open) {
-    // Preload RNNoise so the first clean-up does not pause on the download, and
+    // Preload RNNoise so the first run does not pause on the download, and
     // disable the toggle with a reason if it cannot load at all.
     import("./audio/denoise.js")
       .then((m) => m.loadDenoise())
@@ -848,14 +865,21 @@ $("cleanUpOptsBtn").addEventListener("click", () => {
         if (label) label.title = `Denoise unavailable: ${err.message}`;
       });
   }
-});
+}
+
+// The clean-up button opens the options; the panel's own button runs them.
+$("cleanUpBtn").addEventListener("click", () => showCleanOptions($("cleanOptions").hidden));
+$("cleanClose").addEventListener("click", () => showCleanOptions(false));
 
 $("cleanConsonantDb").addEventListener("input", () => {
   $("cleanConsonantVal").textContent = `${$("cleanConsonantDb").value} dB`;
 });
 
-$("cleanUpBtn").addEventListener("click", async () => {
-  if (!state.pcm || state.pcm.length === 0) return;
+$("cleanRun").addEventListener("click", async () => {
+  if (!state.pcm || state.pcm.length === 0) {
+    $("saveStatus").textContent = "Load or record something first";
+    return;
+  }
   const opts = currentCleanupOptions();
   if (!cleanupActive(opts)) {
     $("saveStatus").textContent = cleanupSummary([]);
@@ -863,16 +887,27 @@ $("cleanUpBtn").addEventListener("click", async () => {
   }
   await withBusy("Cleaning up…", async () => {
     try {
-      const { pcm, steps } = await cleanUp(state.pcm, state.sampleRate, opts, (f) => {
+      const before = state.pcm;
+      const { pcm, steps } = await cleanUp(before, state.sampleRate, opts, (f) => {
         $("busyText").textContent = `Denoising… ${Math.round(f * 100)}%`;
       });
-      if (pcm === state.pcm) {
+      if (pcm === before) {
         $("saveStatus").textContent = cleanupSummary(steps);
         return;
       }
-      setCleanupUndo(state.pcm);
-      const suffix = cleanupUndo ? "" : " (too long to undo)";
+      // A clean-up cannot be inverted, so the history keeps the previous
+      // samples. When the recording is too long to hold a second copy the
+      // history is dropped instead, because its entries would no longer chain.
+      let suffix = "";
+      if (before.length <= CLEANUP_UNDO_MAX_SAMPLES) {
+        pushHistory({ kind: "pcm", before, after: pcm });
+      } else {
+        clearHistory();
+        suffix = " (too long to undo)";
+      }
       await swapSource(pcm, cleanupSummary(steps) + suffix);
+      // Done: put the options away.
+      showCleanOptions(false);
     } catch (err) {
       $("saveStatus").textContent = `Clean up failed: ${err.message}`;
     }
@@ -884,24 +919,17 @@ async function togglePlay() {
   if (!state.pcm || transcribing) return;
   if (player.playing) {
     player.stop();
-    $("playBtn").disabled = false;
-    $("stopPlayBtn").disabled = true;
+    setPlayButton(false);
     return;
   }
   let from = Math.round(state.cursorSample);
   if (from >= state.pcm.length) from = 0;
   await audioContext().resume();
   player.play(from, currentSpeed());
-  $("playBtn").disabled = true;
-  $("stopPlayBtn").disabled = false;
+  setPlayButton(true);
 }
 
 $("playBtn").addEventListener("click", togglePlay);
-$("stopPlayBtn").addEventListener("click", () => {
-  player.stop();
-  $("playBtn").disabled = false;
-  $("stopPlayBtn").disabled = true;
-});
 
 // Spacebar toggles play/stop at the playhead.
 document.addEventListener("keydown", (e) => {
@@ -1068,8 +1096,7 @@ $("transcribeBtn").addEventListener("click", async () => {
   // Transcribing is CPU-heavy (WASM/Whisper); never overlap it with playback.
   if (player.playing) {
     player.stop();
-    $("playBtn").disabled = false;
-    $("stopPlayBtn").disabled = true;
+    setPlayButton(false);
   }
   const btn = $("transcribeBtn");
   const scope = transcriptionScope();
@@ -1232,8 +1259,7 @@ function renderTranscript(result) {
       $("cursorTime").textContent = fmt(sample);
       await audioContext().resume();
       player.play(sample, currentSpeed());
-      $("playBtn").disabled = true;
-      $("stopPlayBtn").disabled = false;
+      setPlayButton(true);
     });
     el.appendChild(div);
     group = [];
