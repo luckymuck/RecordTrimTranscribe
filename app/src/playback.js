@@ -49,7 +49,9 @@ export class Player {
     this.timeStart = 0;
     this.activeSpeed = 1;
     this.requestedSpeed = 1;
-    this.finished = false;
+    // Last kept sample read, used as the ramp start when a read begins exactly
+    // at a gap (PB-11).
+    this._lastKept = 0;
     this.gaps = []; // sorted, non-overlapping {start, end} in source samples
     this.removedBefore = new Float64Array(0);
     this.keptBefore = new Float64Array(0);
@@ -142,7 +144,7 @@ export class Player {
     const from = Math.max(0, Math.floor(fromSample));
     this.srcRead = from;
     this.srcStart = this.sourceToKept(from);
-    this.finished = false;
+    this._lastKept = 0;
     this.posLog = [];
     this.keptConsumed = this.srcStart;
     this.scheduleTime = this.ctx.currentTime + 0.08;
@@ -210,7 +212,11 @@ export class Player {
       const gap = this._gapContaining(this.srcRead);
       if (gap) {
         // Close the gap, easing from the last sample before it into the tail.
-        const prev = n > 0 ? buf[n - 1] : 0;
+        // If this read starts exactly at the gap there is no preceding sample in
+        // the buffer, so fall back to the last sample read before it rather than
+        // 0, which would be a step in the middle of what should be silence
+        // (PB-11).
+        const prev = n > 0 ? buf[n - 1] : this._lastKept;
         this.srcRead = gap.end;
         const take = Math.min(want - n, inputEnd - this.srcRead, xf);
         for (let i = 0; i < take; i++) {
@@ -227,6 +233,7 @@ export class Player {
       buf.set(this.pcm.subarray(this.srcRead, this.srcRead + take), n);
       n += take;
       this.srcRead += take;
+      this._lastKept = buf[n - 1];
     }
     return buf.subarray(0, n);
   }
@@ -253,7 +260,6 @@ export class Player {
         // The engine finalizes a held seam only when signaled, so tell it once
         // that the whole source has been pushed.
         this.stretcher.finish();
-        this.finished = true;
       }
       const got = this.stretcher.pull(needed);
       if (got.length > 0) {

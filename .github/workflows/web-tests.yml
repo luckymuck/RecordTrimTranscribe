@@ -1,0 +1,32 @@
+name: Web tests
+
+# The app's pure logic (transcript formatting, filenames, split boundaries, dial
+# and zoom arithmetic, WAV encoding, normalization) has unit tests under
+# app/test. Nothing else runs them.
+
+on:
+  push:
+    branches: ["main"]
+    paths:
+      - "app/**"
+      - ".github/workflows/web-tests.yml"
+  pull_request:
+    paths:
+      - "app/**"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+      - name: Set up Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+      - name: Run unit tests
+        run: node --test app/test/*.test.mjs

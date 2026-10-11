@@ -12,18 +12,77 @@ const META_PREFIX = "meta:";
 const CHUNK_PREFIX = "chunk:";
 const RANGE_END = "\uffff";
 
+// One shared connection: opening a fresh one per call leaked a connection per
+// operation, and none were ever closed (REC-8).
+let dbPromise = null;
+
 function openDB() {
-  return new Promise((resolve, reject) => {
+  if (dbPromise) return dbPromise;
+  dbPromise = new Promise((resolve, reject) => {
     const rq = indexedDB.open(DB_NAME, 1);
     rq.onupgradeneeded = (e) => {
       if (!e.target.result.objectStoreNames.contains(STORE)) {
         e.target.result.createObjectStore(STORE);
       }
     };
-    rq.onsuccess = (e) => resolve(e.target.result);
-    rq.onerror = (e) => reject(e.target.error || new Error("IndexedDB open failed"));
-    rq.onblocked = () => reject(new Error("IndexedDB open blocked"));
+    rq.onsuccess = (e) => {
+      const db = e.target.result;
+      // Another tab upgrading the schema needs this connection out of the way.
+      db.onversionchange = () => {
+        try {
+          db.close();
+        } catch (err) {}
+        dbPromise = null;
+      };
+      resolve(db);
+    };
+    rq.onerror = (e) => {
+      dbPromise = null;
+      reject(e.target.error || new Error("IndexedDB open failed"));
+    };
+    rq.onblocked = () => {
+      dbPromise = null;
+      reject(new Error("IndexedDB open blocked"));
+    };
   });
+  return dbPromise;
+}
+
+/** Close the shared connection (called on unload). */
+export function closeStorage() {
+  const p = dbPromise;
+  dbPromise = null;
+  if (!p) return;
+  p.then((db) => {
+    try {
+      db.close();
+    } catch (e) {}
+  }).catch(() => {});
+}
+
+/**
+ * Ask the browser to make this origin's storage persistent, so a long recording
+ * is not evicted under pressure. Best effort; returns whether it is persistent.
+ */
+export async function requestPersistentStorage() {
+  try {
+    if (!navigator.storage || !navigator.storage.persist) return false;
+    if (navigator.storage.persisted && (await navigator.storage.persisted())) return true;
+    return await navigator.storage.persist();
+  } catch (e) {
+    return false;
+  }
+}
+
+/** `{ usage, quota }` in bytes, or null when the browser will not say. */
+export async function storageEstimate() {
+  try {
+    if (!navigator.storage || !navigator.storage.estimate) return null;
+    const { usage = 0, quota = 0 } = await navigator.storage.estimate();
+    return quota > 0 ? { usage, quota } : null;
+  } catch (e) {
+    return null;
+  }
 }
 
 function write(db, work) {

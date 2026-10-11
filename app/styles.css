@@ -53,6 +53,14 @@ main { max-width: 960px; margin: 0 auto; padding: 0.8rem 1rem 1.4rem; display: f
 .wave-controls { flex-wrap: nowrap; overflow-x: auto; scrollbar-width: thin; padding-bottom: 2px; }
 .wave-controls .btn,
 .wave-controls .speed-dial { flex-shrink: 0; }
+/* UI-2: a single sideways-scrolling toolbar is hard to discover on a phone, so
+   let the controls wrap once there is no room for one line. */
+@media (max-width: 760px) {
+  .wave-controls { flex-wrap: wrap; overflow-x: visible; }
+}
+.sm-select { padding: 0.26rem 0.4rem; font-size: 0.78rem; }
+#mainwave:focus-visible,
+#overview:focus-visible { outline: 2px solid var(--accent2); outline-offset: 1px; }
 .sep { width: 1px; height: 18px; background: var(--line); }
 .muted { color: var(--muted); font-size: 0.76rem; }
 

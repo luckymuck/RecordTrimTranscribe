@@ -1,4 +1,4 @@
-// On-device transcription with Whisper via transformers.js (WASM/WebGPU).
+// On-device transcription with Whisper via transformers.js (WASM).
 import { pipeline, env } from "@huggingface/transformers";
 import { resampleHQ } from "../audio/decode.js";
 
@@ -11,10 +11,10 @@ let loadedKey = null;
 let pending = null;
 let pendingKey = null;
 
-// A WebGPU session that stalls partway through the file never returns, so each
-// window is given a deadline; on expiry the pipeline is dropped and the window
-// is retried on WASM. Cancellation is cooperative: checked between windows, and
-// it also aborts a window that is currently waiting.
+// Inference can in principle hang, so each window is given a deadline. On
+// expiry the run stops and keeps the partial transcript rather than waiting
+// forever. Cancellation is cooperative: checked between windows, and it also
+// aborts a window that is currently in flight.
 const WINDOW_TIMEOUT_MS = 120000;
 let cancelled = false;
 // Resolvers waiting on cancellation, so Cancel aborts the window in flight
@@ -42,27 +42,9 @@ function cancelSignal() {
   return new Promise((resolve) => cancelWaiters.push(resolve));
 }
 
-// WebGPU load guard. `navigator.gpu` can exist without a usable adapter, and
-// requesting one can throw, so probe before asking for the WebGPU device.
-// Returns the dtype to use on WebGPU, or null when WebGPU is not usable.
-const WEBGPU_LOAD_TIMEOUT_MS = 120000;
-
-async function webgpuDtype() {
-  if (!navigator.gpu) return null;
-  try {
-    const adapter = await navigator.gpu.requestAdapter();
-    if (!adapter) return null;
-    // fp16 halves the download where the adapter supports it.
-    return adapter.features.has("shader-f16") ? "fp16" : "fp32";
-  } catch (e) {
-    return null;
-  }
-}
-
-function pipelineOptions(device, dtype, onProgress) {
+function pipelineOptions(dtype, onProgress) {
   return {
     dtype,
-    ...(device ? { device } : {}),
     progress_callback: onProgress,
   };
 }
@@ -76,19 +58,12 @@ function withTimeout(promise, ms, message) {
   ]);
 }
 
-async function getPipeline(modelId, onProgress, device, onStatus) {
-  let useDevice = device;
-  let dtype = "q8";
-  if (useDevice) {
-    const gpuDtype = await webgpuDtype();
-    if (gpuDtype) {
-      dtype = gpuDtype;
-    } else {
-      onStatus && onStatus("WebGPU not available — using WASM");
-      useDevice = undefined;
-    }
-  }
-  const key = `${modelId}|${useDevice || "wasm"}`;
+/** Load (or reuse) the WASM pipeline for `modelId`, disposing a previous model. */
+async function getPipeline(modelId, onProgress) {
+  // q8 keeps the download and the memory footprint small; it is what the
+  // timestamps-capable ONNX exports are published as.
+  const dtype = "q8";
+  const key = `${modelId}|wasm`;
   if (current && loadedKey === key) return current;
   if (pending && pendingKey === key) return pending;
   if (current) {
@@ -100,33 +75,7 @@ async function getPipeline(modelId, onProgress, device, onStatus) {
     loadedKey = null;
   }
   pendingKey = key;
-  pending = (async () => {
-    if (useDevice) {
-      // q8 is the WASM quantisation. The WebGPU execution provider needs a
-      // float dtype -- a quantized model on WebGPU tends to hang rather than
-      // fail, which is what made the WebGPU option appear to do nothing.
-      const load = pipeline(
-        "automatic-speech-recognition",
-        modelId,
-        pipelineOptions("webgpu", dtype, onProgress)
-      );
-      return withTimeout(load, WEBGPU_LOAD_TIMEOUT_MS, "WebGPU load timed out");
-    }
-    return pipeline(
-      "automatic-speech-recognition",
-      modelId,
-      pipelineOptions(undefined, dtype, onProgress)
-    );
-  })()
-    .catch((err) => {
-      if (!useDevice) throw err;
-      onStatus && onStatus("WebGPU failed — falling back to WASM…");
-      return pipeline(
-        "automatic-speech-recognition",
-        modelId,
-        pipelineOptions(undefined, "q8", onProgress)
-      );
-    })
+  pending = pipeline("automatic-speech-recognition", modelId, pipelineOptions(dtype, onProgress))
     .then((pipe) => {
       current = pipe;
       loadedKey = key;
@@ -273,12 +222,11 @@ function splitTranscriptionWindows(samples, sampleRate) {
  * `*_timestamped` ONNX exports). If the selected model cannot provide them, we
  * transparently retry without timestamps and return plain text.
  */
-export async function transcribe(pcm, sampleRate, modelId, { onProgress, onStatus, onSegment, language, device } = {}) {
+export async function transcribe(pcm, sampleRate, modelId, { onProgress, onStatus, onSegment, language } = {}) {
   cancelled = false;
   cancelWaiters = [];
   onStatus && onStatus("Loading model…");
-  let activeDevice = device;
-  let pipe = await getPipeline(modelId, onProgress, activeDevice, onStatus);
+  const pipe = await getPipeline(modelId, onProgress);
   onStatus && onStatus("Transcribing… 0%");
   const pcm16k = await resampleHQ(pcm, sampleRate, 16000);
   const windows = splitTranscriptionWindows(pcm16k, 16000);
@@ -290,10 +238,9 @@ export async function transcribe(pcm, sampleRate, modelId, { onProgress, onStatu
   /**
    * Run one window with a deadline.
    *
-   * A stalled WebGPU session never returns, and it keeps the underlying ONNX
-   * session busy, so starting another run -- even on a freshly loaded pipeline
-   * -- fails with "Session already started". The only safe move is to stop and
-   * keep whatever was already transcribed.
+   * A stalled session never returns and keeps the underlying ONNX session busy,
+   * so starting another run fails with "Session already started". The only safe
+   * move is to stop and keep whatever was already transcribed.
    */
   const infer = async (audio, options) => {
     if (cancelled) throw new CancelledError();
@@ -307,7 +254,7 @@ export async function transcribe(pcm, sampleRate, modelId, { onProgress, onStatu
     } catch (err) {
       if (cancelled) throw new CancelledError();
       const message = String((err && err.message) || err);
-      if (activeDevice && /timed out|session already started/i.test(message)) {
+      if (/timed out|session already started/i.test(message)) {
         throw Object.assign(new Error(message), { stalled: true });
       }
       throw err;
@@ -320,17 +267,26 @@ export async function transcribe(pcm, sampleRate, modelId, { onProgress, onStatu
   let completedSeconds = 0;
 
   try {
+  // Window texts are joined with a space when they come from the plain-text
+  // fallback; word tokens already carry their own spacing (TX-10).
+  const appendText = (t) => {
+    const s = (t || "").trim();
+    if (!s) return;
+    if (text && !/\s$/.test(text)) text += " ";
+    text += s;
+  };
+
   for (let index = 0; index < windows.length; index += 1) {
     if (cancelled) throw new CancelledError();
-    const window = windows[index];
-    const audioStartSeconds = window.audioStart / 16000;
-    const assignStartSeconds = window.assignStart / 16000;
-    const assignEndSeconds = window.assignEnd / 16000;
+    const seg = windows[index];
+    const audioStartSeconds = seg.audioStart / 16000;
+    const assignStartSeconds = seg.assignStart / 16000;
+    const assignEndSeconds = seg.assignEnd / 16000;
 
     if (wantTimestamps) {
       try {
         const result = await infer(
-          pcm16k.subarray(window.audioStart, window.audioEnd),
+          pcm16k.subarray(seg.audioStart, seg.audioEnd),
           { ...baseOptions, return_timestamps: "word" }
         );
         const words = Array.isArray(result.chunks) ? result.chunks : [];
@@ -338,10 +294,16 @@ export async function transcribe(pcm, sampleRate, modelId, { onProgress, onStatu
         if (result.text && timestamped.length === 0) {
           wantTimestamps = false;
           const fallback = await infer(
-            pcm16k.subarray(window.assignStart, window.assignEnd),
+            pcm16k.subarray(seg.assignStart, seg.assignEnd),
             { ...baseOptions }
           );
-          text += fallback.text || "";
+          appendText(fallback.text);
+          // Keep what was collected before the model gave up on timestamps: this
+          // window becomes one un-timestamped chunk spanning it, instead of
+          // discarding every earlier word chunk (TX-10).
+          if (fallback.text) {
+            chunks.push({ text: fallback.text, timestamp: [assignStartSeconds, assignEndSeconds] });
+          }
         } else {
           for (const word of timestamped) {
             const start = word.timestamp[0] + audioStartSeconds;
@@ -366,20 +328,26 @@ export async function transcribe(pcm, sampleRate, modelId, { onProgress, onStatu
           wantTimestamps = false;
           onStatus && onStatus("Model lacks timestamp data — transcribing without timestamps…");
           const fallback = await infer(
-            pcm16k.subarray(window.assignStart, window.assignEnd),
+            pcm16k.subarray(seg.assignStart, seg.assignEnd),
             { ...baseOptions }
           );
-          text += fallback.text || "";
+          appendText(fallback.text);
+          if (fallback.text) {
+            chunks.push({ text: fallback.text, timestamp: [assignStartSeconds, assignEndSeconds] });
+          }
         } else {
           throw err;
         }
       }
     } else {
       const fallback = await infer(
-        pcm16k.subarray(window.assignStart, window.assignEnd),
+        pcm16k.subarray(seg.assignStart, seg.assignEnd),
         { ...baseOptions }
       );
-      text += fallback.text || "";
+      appendText(fallback.text);
+      if (fallback.text) {
+        chunks.push({ text: fallback.text, timestamp: [assignStartSeconds, assignEndSeconds] });
+      }
     }
 
     if (onSegment) {
@@ -395,10 +363,10 @@ export async function transcribe(pcm, sampleRate, modelId, { onProgress, onStatu
   }
   } catch (err) {
     if (err && err.stalled) {
-      onStatus && onStatus("WebGPU stalled — stopping (partial transcript kept)");
+      onStatus && onStatus("Inference stalled — stopping (partial transcript kept)");
       return {
         text,
-        chunks: wantTimestamps ? chunks : null,
+        chunks: chunks.length ? chunks : null,
         timestamped: wantTimestamps,
         stalled: true,
         completedSeconds,
@@ -407,30 +375,7 @@ export async function transcribe(pcm, sampleRate, modelId, { onProgress, onStatu
     throw err;
   }
 
-  if (wantTimestamps) {
-    return { text, chunks, timestamped: true };
-  }
-  return { text, chunks: null, timestamped: false };
-}
-
-export function toSrt(chunks) {
-  const fmt = (s) => {
-    const ms = Math.floor((s % 1) * 1000);
-    const total = Math.floor(s);
-    const hh = String(Math.floor(total / 3600)).padStart(2, "0");
-    const mm = String(Math.floor((total % 3600) / 60)).padStart(2, "0");
-    const ss = String(total % 60).padStart(2, "0");
-    return `${hh}:${mm}:${ss},${String(ms).padStart(3, "0")}`;
-  };
-  // Group word chunks into ~1 line per 8 words.
-  const words = (chunks || []).filter((c) => c.timestamp);
-  const lines = [];
-  for (let i = 0; i < words.length; i += 8) {
-    const group = words.slice(i, i + 8);
-    const start = group[0].timestamp[0];
-    const end = group[group.length - 1].timestamp[1] ?? group[group.length - 1].timestamp[0] + 1;
-    const text = group.map((w) => w.text).join("").trim();
-    lines.push(`${lines.length + 1}\n${fmt(start)} --> ${fmt(end)}\n${text}\n`);
-  }
-  return lines.join("\n");
+  // Chunks are returned even when word timestamps were unavailable: those
+  // windows are represented as one span each, so the transcript is complete.
+  return { text, chunks: chunks.length ? chunks : null, timestamped: wantTimestamps };
 }

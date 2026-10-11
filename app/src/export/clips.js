@@ -1,17 +1,8 @@
 // Clip splitting and file download helpers.
 import { encode } from "../audio/encode.js";
 
-/** Build clips from sorted split sample positions. */
-export function buildClips(splits, totalLength) {
-  const points = [0, ...splits.filter((s) => s > 0 && s < totalLength), totalLength];
-  const clips = [];
-  for (let i = 0; i < points.length - 1; i++) {
-    if (points[i + 1] > points[i]) {
-      clips.push({ start: points[i], end: points[i + 1] });
-    }
-  }
-  return clips;
-}
+// Split validation and boundaries live in a pure module so they can be tested.
+export { buildClips, isValidSplit, normalizeSplits, splitLabels } from "./boundaries.js";
 
 export function sampleSlice(pcm, start, end) {
   return pcm.subarray(Math.max(0, start), Math.min(pcm.length, end));
@@ -25,7 +16,9 @@ export function downloadBlob(blob, filename) {
   document.body.appendChild(a);
   a.click();
   a.remove();
-  setTimeout(() => URL.revokeObjectURL(url), 2000);
+  // Long enough that a large download cannot be cut off mid-transfer; the
+  // object is released when the page goes away regardless.
+  setTimeout(() => URL.revokeObjectURL(url), 60000);
 }
 
 export function exportSlice(pcm, sampleRate, start, end, format, filename) {

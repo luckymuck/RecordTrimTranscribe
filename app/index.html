@@ -58,9 +58,9 @@
   <section class="card" id="waveCard" aria-disabled="true">
     <h2><span class="badge">2</span> Waveform &amp; Trim / Split</h2>
     <div class="wave-shell">
-      <canvas id="overview" height="30"></canvas>
+      <canvas id="overview" height="30" tabindex="0" aria-label="Overview waveform"></canvas>
       <div class="wave-main">
-        <canvas id="mainwave" height="120"></canvas>
+        <canvas id="mainwave" height="120" tabindex="0" aria-label="Waveform — arrow keys move the cursor, [ and ] add and remove splits"></canvas>
         <div id="playhead"></div>
       </div>
     </div>
@@ -68,8 +68,8 @@
       <button id="playBtn" class="btn icon-btn" title="Play / pause (Space)">▶</button>
       <button id="stopPlayBtn" class="btn icon-btn" disabled title="Stop">■</button>
       <span class="sep"></span>
-      <span id="speed" class="speed-dial" tabindex="0" role="slider" aria-label="Playback speed" aria-valuemin="1" aria-valuemax="4" aria-valuenow="1.00"
-        title="Drag left / right to change speed · click to add 0.25× · double-click to reset">1.00×</span>
+      <span id="speed" class="speed-dial" tabindex="0" role="slider" aria-label="Playback speed" aria-valuemin="1" aria-valuemax="4" aria-valuenow="1.00" aria-valuetext="1.00 times"
+        title="Drag left / right to change speed (1.00×–4.00×, no slow-down) · click to add 0.25× · double-click to reset">1.00×</span>
       <button id="skipSilence" class="btn sm toggle" type="button" aria-pressed="false"
         title="Skip silence longer than 0.25 s — during playback and in speed-baked exports">skip silence</button>
       <span class="sep"></span>
@@ -80,9 +80,14 @@
       <span class="sep"></span>
       <button class="btn sm" id="addSplit">+split</button>
       <button class="btn sm" id="clearSplits">clear</button>
-      <button class="btn sm" id="normBtn" title="Normalize peak level to −1 dB">Norm</button>
+      <button class="btn sm" id="normBtn" title="Normalize the recording's level">Norm</button>
+      <select id="normMode" class="sm-select" aria-label="Normalize mode"
+        title="peak: scale the loudest sample to −1 dBFS. rms: scale so the average level hits −20 dBFS, keeping the peak under −1 dBFS.">
+        <option value="peak" selected>peak</option>
+        <option value="rms">rms</option>
+      </select>
+      <button class="btn sm" id="normUndo" disabled title="Undo the last normalize (exact)">undo</button>
       <span class="muted" id="splitInfo">0 splits</span>
-      <span class="muted" id="playMode">streaming</span>
       <span class="muted time" id="cursorTime">—</span>
     </div>
     <p class="hint">Scroll to zoom · drag to scroll · click to seek · Ctrl+click to split at that spot · drag a split line to move it</p>
@@ -119,14 +124,14 @@
         </select>
       </label>
       <label class="chk">model
-        <select id="modelSel">
-          <option value="onnx-community/whisper-tiny_timestamped">tiny (fast)</option>
-          <option value="onnx-community/whisper-base_timestamped" selected>base (default)</option>
-          <option value="onnx-community/whisper-small_timestamped">small (accurate)</option>
+        <select id="modelSel" title="Models are downloaded once from the CDN and cached by the browser (about 40 MB / 75 MB / 250 MB)">
+          <option value="onnx-community/whisper-tiny_timestamped">tiny (~40 MB, fast)</option>
+          <option value="onnx-community/whisper-base_timestamped" selected>base (~75 MB, default)</option>
+          <option value="onnx-community/whisper-small_timestamped">small (~250 MB, accurate)</option>
         </select>
       </label>
-      <label class="chk">lang
-        <select id="langSel" title="Force the language instead of auto-detecting per window">
+      <label class="chk" title="Force the language instead of auto-detecting per window">
+        <select id="langSel" aria-label="Transcription language">
           <option value="" selected>auto</option>
           <option value="en">English</option>
           <option value="es">Spanish</option>
@@ -140,7 +145,6 @@
           <option value="ko">Korean</option>
         </select>
       </label>
-      <label class="chk" title="Use WebGPU when available (much faster to start). Experimental: it can stall partway through a long file, in which case the partial transcript is kept and the rest is left for a WASM re-run."><input type="checkbox" id="webgpuChk"> WebGPU</label>
       <span class="muted" id="txStatus"></span>
     </div>
     <div class="progress"><div id="txProgress"></div></div>
@@ -148,6 +152,7 @@
     <div class="row" id="txActions" style="display:none">
       <button class="btn sm" id="downloadTx">⬇ Download .txt</button>
       <button class="btn sm" id="downloadSrt">⬇ Download .srt</button>
+      <button class="btn sm" id="downloadVtt">⬇ Download .vtt</button>
     </div>
   </section>
 </main>

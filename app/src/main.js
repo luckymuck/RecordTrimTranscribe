@@ -2,12 +2,24 @@
 import { initDsp, getDspVersion, makeBakedMap, makeSkipBakedMap, timeStretchSkipSilence, silenceZones } from "./core/dsp.js";
 import { decodeAudioBlob, audioContext } from "./audio/decode.js";
 import { Recorder } from "./audio/record.js";
-import { encode, encodeWav } from "./audio/encode.js";
-import { appendChunk, createSession, deleteSession, listSessions, loadSession, replaceSnapshot, storageAvailable } from "./storage.js";
+import { encode, encodeAsync, encodeWav } from "./audio/encode.js";
+import { appendChunk, closeStorage, createSession, deleteSession, listSessions, loadSession, replaceSnapshot, requestPersistentStorage, storageAvailable, storageEstimate } from "./storage.js";
 import { WaveformView } from "./ui/waveform.js";
 import { Player } from "./playback.js";
-import { transcribe, toSrt, cancelTranscription } from "./transcribe/whisper.js";
-import { buildClips, exportSlice, downloadBlob } from "./export/clips.js";
+import { transcribe, cancelTranscription } from "./transcribe/whisper.js";
+import { toSrt, toTxt, toVtt } from "./transcript/format.js";
+import { exportSlice, downloadBlob } from "./export/clips.js";
+import { buildClips, splitLabels } from "./export/boundaries.js";
+import {
+  backupName,
+  clipExportName,
+  exportBaseName,
+  recordingName,
+  wholeExportName,
+} from "./util/filenames.js";
+import { CLICK_PX, SPEED_MAX, SPEED_MIN, clampSpeed, speedAfterDrag, speedFromDrag, stepSpeed } from "./ui/speed.js";
+import { zoomAnchor, zoomAround } from "./ui/view.js";
+import { applyGain, NORM_PEAK, NORM_RMS_DB, normalizeGain, peakOf } from "./audio/normalize.js";
 
 const $ = (id) => document.getElementById(id);
 
@@ -130,18 +142,6 @@ function fmtSeconds(s) {
   return `${mm}:${ss}.${cs}`;
 }
 
-/** Name a new recording as `MMDDYYYY HHMM` (24-hour) from the current time. */
-function recordingName(date = new Date()) {
-  const mm = String(date.getMonth() + 1).padStart(2, "0");
-  const dd = String(date.getDate()).padStart(2, "0");
-  const yyyy = date.getFullYear();
-  const hh = String(date.getHours()).padStart(2, "0");
-  const min = String(date.getMinutes()).padStart(2, "0");
-  return `${mm}${dd}${yyyy} ${hh}${min}`;
-}
-
-const SPEED_MIN = 1.0;
-const SPEED_MAX = 4.0;
 let speedValue = 1.0;
 
 // Silence longer than this is skipped, both in playback and in a speed-baked
@@ -158,6 +158,23 @@ let skipSilence = false;
 // applied when the gap map is built, so changing speed never re-scans.
 let silenceRunCache = null;
 
+// Approximate one-time download size per model, shown before the first
+// transcription so the fetch is never a surprise (TX-13).
+const MODEL_SIZES = {
+  "onnx-community/whisper-tiny_timestamped": "40 MB",
+  "onnx-community/whisper-base_timestamped": "75 MB",
+  "onnx-community/whisper-small_timestamped": "250 MB",
+};
+let modelNoteShown = false;
+
+/** Human-readable free storage, or "" when the browser will not say. */
+async function freeStorageText() {
+  const est = await storageEstimate();
+  if (!est) return "";
+  const mb = (n) => `${Math.round(n / 1048576)} MB`;
+  return `${mb(Math.max(0, est.quota - est.usage))} free of ${mb(est.quota)}`;
+}
+
 function currentSpeed() {
   return speedValue;
 }
@@ -168,7 +185,7 @@ function skipKeepSourceSeconds(speed = speedValue) {
 }
 
 function setSpeedUI(s, rebase = true) {
-  speedValue = Math.round(Math.min(SPEED_MAX, Math.max(SPEED_MIN, s)) * 100) / 100;
+  speedValue = clampSpeed(s);
   $("speed").textContent = speedValue.toFixed(2) + "×";
   $("speed").setAttribute("aria-valuenow", speedValue.toFixed(2));
   player.setSpeed(speedValue);
@@ -300,7 +317,11 @@ function confirmIfUnsaved() {
 
 function enableCards(enabled) {
   for (const id of ["waveCard", "txCard", "exportCard"]) {
-    $(id).setAttribute("aria-disabled", enabled ? "false" : "true");
+    const card = $(id);
+    card.setAttribute("aria-disabled", enabled ? "false" : "true");
+    // UI-2: aria-disabled alone left the controls focusable and tabbable.
+    // `inert` removes them from the tab order and from hit testing.
+    card.inert = !enabled;
   }
 }
 
@@ -449,10 +470,12 @@ function sortedTranscriptChunks() {
   return list;
 }
 
-function transcriptWordsForClip(startSample) {
+/** First few transcribed words of the clip starting at `startSample` (TX-9). */
+function transcriptWordsForClip(startSample, endSample) {
   const list = sortedTranscriptChunks();
   if (!list.length || !state.pcm) return "";
   const startSeconds = startSample / state.sampleRate;
+  const endSeconds = (endSample == null ? state.pcm.length : endSample) / state.sampleRate;
   let lo = 0;
   let hi = list.length;
   while (lo < hi) {
@@ -460,8 +483,12 @@ function transcriptWordsForClip(startSample) {
     if (list[mid].timestamp[0] < startSeconds) lo = mid + 1;
     else hi = mid;
   }
+  // Bounded to the clip at both ends: a split in an untranscribed region used to
+  // pick up whatever words came next from anywhere later in the file.
   const text = list
-    .slice(lo, lo + 4)
+    .slice(lo)
+    .filter((w) => w.timestamp[0] >= startSeconds && w.timestamp[0] < endSeconds)
+    .slice(0, 4)
     .map((w) => w.text.trim())
     .join(" ")
     .trim();
@@ -473,10 +500,13 @@ function updateSplitLabels() {
     waveform.setSplitLabels([]);
     return;
   }
-  const labels = state.splits.map((s, i) => {
-    const time = fmtShort(s);
-    const num = String(i + 1).padStart(2, "0");
-    return `${time}-${num}${transcriptWordsForClip(s)}`;
+  // Number only the splits that become clip boundaries, so the labels on the
+  // waveform are exactly the clip numbers in the export list (WF-2). Each label
+  // is bounded to its own clip (TX-9).
+  const valid = splitLabels(state.splits, state.pcm.length);
+  const labels = valid.map(({ sample, label }, i) => {
+    const end = i + 1 < valid.length ? valid[i + 1].sample : state.pcm.length;
+    return `${fmtShort(sample)}-${label}${transcriptWordsForClip(sample, end)}`;
   });
   waveform.setSplitLabels(labels);
 }
@@ -514,6 +544,19 @@ $("recordBtn").addEventListener("click", async () => {
   if (!confirmIfUnsaved()) return;
   // Avoid playing old audio, decoding replacements, or competing CPU load.
   if (player.playing) player.stop();
+  // REC-8: ask for persistent storage and check there is room, so a long
+  // recording is not evicted and does not fill the quota mid-capture.
+  requestPersistentStorage().catch(() => {});
+  if (storageAvailable()) {
+    const est = await storageEstimate();
+    if (est && est.quota - est.usage < 100 * 1024 * 1024) {
+      const ok = confirm(
+        `Only ${Math.round((est.quota - est.usage) / 1048576)} MB of browser storage is free. ` +
+          `A long recording may not be recoverable if it runs out. Continue?`
+      );
+      if (!ok) return;
+    }
+  }
   setRecordingUi(true);
   $("recordBtn").disabled = true; // guard against double-click while opening the mic
   // Persist chunks as they arrive so a crash mid-recording is recoverable.
@@ -585,6 +628,19 @@ $("fileInput").addEventListener("change", async (e) => {
     e.target.value = "";
     return;
   }
+  // REC-10: decoding expands the whole file to 32-bit float (an hour of stereo
+  // is about 1.4 GB before the mono mixdown). Warn before a big one, and give a
+  // clear message if it fails rather than a bare browser error.
+  if (file.size > 100 * 1024 * 1024) {
+    const ok = confirm(
+      `This file is ${(file.size / 1048576).toFixed(0)} MB. Decoding expands it to 32-bit float in memory ` +
+        `(several times the file size), and a very long file can fail. Continue?`
+    );
+    if (!ok) {
+      e.target.value = "";
+      return;
+    }
+  }
   try {
     await withBusy(`Loading ${file.name}…`, async () => {
       const d = await decodeAudioBlob(file);
@@ -592,25 +648,26 @@ $("fileInput").addEventListener("change", async (e) => {
       setSource(d.pcm, d.sampleRate, file.name, { autosave: false, saved: true });
     });
   } catch (err) {
-    alert("Could not decode file: " + err.message);
+    const detail = err && err.message ? err.message : String(err);
+    alert(`Could not decode file: ${detail}\n\nVery long files can run out of memory while decoding.`);
   }
   // Clear the input so choosing the same file again still fires a change event.
   e.target.value = "";
 });
 
 // ── Waveform tools ──────────────────────────────────────────────────────────
-$("zoomIn").addEventListener("click", () => {
-  waveform.viewLen *= 0.7;
+/** Zoom keeping the playhead (or the view centre) fixed (WF-14). */
+function zoomBy(factor) {
+  const anchor = zoomAnchor(waveform.viewStart, waveform.viewLen, state.cursorSample);
+  const view = zoomAround(waveform.viewStart, waveform.viewLen, factor, anchor);
+  waveform.viewStart = view.viewStart;
+  waveform.viewLen = view.viewLen;
   waveform._clampView();
   waveform.draw();
   $("zoomLabel").textContent = waveform._zoomLabel();
-});
-$("zoomOut").addEventListener("click", () => {
-  waveform.viewLen *= 1.4;
-  waveform._clampView();
-  waveform.draw();
-  $("zoomLabel").textContent = waveform._zoomLabel();
-});
+}
+$("zoomIn").addEventListener("click", () => zoomBy(0.7));
+$("zoomOut").addEventListener("click", () => zoomBy(1.4));
 $("zoomAll").addEventListener("click", () => {
   waveform.resetZoom();
   $("zoomLabel").textContent = waveform._zoomLabel();
@@ -621,28 +678,67 @@ $("addSplit").addEventListener("click", () => {
 });
 $("clearSplits").addEventListener("click", () => waveform.clearSplits());
 
-/** -1 dBFS peak level (10^(-1/20)). */
-const NORM_PEAK = Math.pow(10, -1 / 20);
+// ── Keyboard control of the waveform (UI-2) ─────────────────────────────────
+// The canvases are focusable; arrows nudge the cursor (Shift = ten steps) and
+// [ / ] add and remove a split at it.
+{
+  // One step is 1% of the visible range, so it stays useful at every zoom.
+  const stepSamples = () => Math.max(1, Math.round((waveform.viewLen || 1) / 100));
+  const moveCursor = (sample) => {
+    if (!state.pcm) return;
+    const next = Math.max(0, Math.min(state.pcm.length, Math.round(sample)));
+    state.cursorSample = next;
+    waveform.setPlayhead(next);
+    $("cursorTime").textContent = fmt(next);
+  };
+  const onKey = (e) => {
+    if (!state.pcm) return;
+    const big = e.shiftKey ? 10 : 1;
+    if (e.key === "ArrowLeft") {
+      e.preventDefault();
+      moveCursor(state.cursorSample - stepSamples() * big);
+    } else if (e.key === "ArrowRight") {
+      e.preventDefault();
+      moveCursor(state.cursorSample + stepSamples() * big);
+    } else if (e.key === "Home") {
+      e.preventDefault();
+      moveCursor(0);
+    } else if (e.key === "End") {
+      e.preventDefault();
+      moveCursor(state.pcm.length);
+    } else if (e.key === "[") {
+      e.preventDefault();
+      waveform.addSplit(state.cursorSample);
+    } else if (e.key === "]") {
+      e.preventDefault();
+      // Remove the split nearest the cursor, if one is close enough.
+      const tolerance = Math.max(stepSamples(), Math.round(state.pcm.length / 200));
+      let best = -1;
+      let bestDist = Infinity;
+      state.splits.forEach((s, i) => {
+        const d = Math.abs(s - state.cursorSample);
+        if (d < bestDist) {
+          bestDist = d;
+          best = i;
+        }
+      });
+      if (best >= 0 && bestDist <= tolerance) waveform.removeSplit(best);
+    }
+  };
+  for (const id of ["mainwave", "overview"]) $(id).addEventListener("keydown", onKey);
+}
 
-$("normBtn").addEventListener("click", async () => {
-  if (!state.pcm || state.pcm.length === 0) return;
-  let peak = 0;
-  for (let i = 0; i < state.pcm.length; i++) {
-    const a = Math.abs(state.pcm[i]);
-    if (a > peak) peak = a;
-  }
-  if (!(peak > 0)) {
-    $("saveStatus").textContent = "No signal to normalize";
-    return;
-  }
+// ── Normalize ───────────────────────────────────────────────────────────────
+// Undo is exact: normalizing only multiplies, so applying 1/gain in float32
+// restores the original samples without keeping a second copy of the PCM.
+let normalizeUndo = null;
+
+/** Swap in new PCM for the current source and re-settle everything downstream. */
+async function swapSource(newPcm, message) {
   const wasPlaying = player.playing;
-  const beforeDb = 20 * Math.log10(peak);
-  const out = new Float32Array(state.pcm.length);
-  const gain = NORM_PEAK / peak;
-  for (let i = 0; i < state.pcm.length; i++) out[i] = state.pcm[i] * gain;
-  state.pcm = out;
-  waveform.refreshData(out, state.sampleRate);
-  player.setSource(out, state.sampleRate);
+  state.pcm = newPcm;
+  waveform.refreshData(newPcm, state.sampleRate);
+  player.setSource(newPcm, state.sampleRate);
   silenceRunCache = null;
   clearRenderCache();
   applySkipSilence();
@@ -654,7 +750,39 @@ $("normBtn").addEventListener("click", async () => {
     $("playBtn").disabled = true;
     $("stopPlayBtn").disabled = false;
   }
-  $("saveStatus").textContent = `Normalized: peak ${beforeDb.toFixed(2)} dB → −1.00 dB`;
+  $("saveStatus").textContent = message;
+}
+
+function setNormalizeUndo(gain) {
+  normalizeUndo = gain === null ? null : { gain };
+  const btn = $("normUndo");
+  if (btn) btn.disabled = !normalizeUndo;
+}
+
+$("normBtn").addEventListener("click", async () => {
+  if (!state.pcm || state.pcm.length === 0) return;
+  const mode = $("normMode") ? $("normMode").value : "peak";
+  const gain = normalizeGain(state.pcm, mode);
+  if (gain === null) {
+    $("saveStatus").textContent = "No signal to normalize";
+    return;
+  }
+  const before = 20 * Math.log10(peakOf(state.pcm));
+  const out = applyGain(state.pcm, gain);
+  setNormalizeUndo(gain);
+  await swapSource(
+    out,
+    mode === "rms"
+      ? `Normalized to ${NORM_RMS_DB} dBFS RMS (peak was ${before.toFixed(2)} dB)`
+      : `Normalized: peak ${before.toFixed(2)} dB → ${(20 * Math.log10(NORM_PEAK)).toFixed(2)} dB`
+  );
+});
+
+$("normUndo").addEventListener("click", async () => {
+  if (!state.pcm || !normalizeUndo) return;
+  const { gain } = normalizeUndo;
+  setNormalizeUndo(null);
+  await swapSource(applyGain(state.pcm, 1 / gain), "Normalize undone");
 });
 
 // ── Playback ────────────────────────────────────────────────────────────────
@@ -684,6 +812,9 @@ $("stopPlayBtn").addEventListener("click", () => {
 // Spacebar toggles play/stop at the playhead.
 document.addEventListener("keydown", (e) => {
   if (e.code !== "Space") return;
+  // Holding the key repeats the event; toggling on every repeat made playback
+  // stutter on and off (REC-9).
+  if (e.repeat) return;
   const t = e.target;
   if (t && ["INPUT", "TEXTAREA", "SELECT", "BUTTON"].includes(t.tagName)) return;
   e.preventDefault();
@@ -696,24 +827,30 @@ document.addEventListener("keydown", (e) => {
   dial.addEventListener("pointerdown", (e) => {
     e.preventDefault();
     dial.setPointerCapture(e.pointerId);
-    drag = { x: e.clientX, start: speedValue, moved: false };
+    drag = { x: e.clientX, start: speedValue, dx: 0, moved: false };
   });
   dial.addEventListener("pointermove", (e) => {
     if (!drag) return;
-    const dx = e.clientX - drag.x;
-    if (Math.abs(dx) > 3) drag.moved = true;
+    drag.dx = e.clientX - drag.x;
+    if (Math.abs(drag.dx) > CLICK_PX) drag.moved = true;
     dial.classList.add("dragging");
     // Mid-drag: no skip-map re-base, so the drag stays smooth.
-    setSpeedUI(drag.start + dx * 0.005, false);
+    setSpeedUI(speedFromDrag(drag.start, drag.dx), false);
   });
   const endDrag = (cancelled) => {
     if (!drag) return;
-    const moved = drag.moved;
+    const { start, dx } = drag;
     drag = null;
     dial.classList.remove("dragging");
-    // A cancelled pointer (touch scroll, capture loss) is not a click.
-    if (!moved && !cancelled) setSpeedUI(speedValue + 0.25); // plain click
-    else if (skipSilence) rebaseSkipSilence();
+    // A cancelled pointer (touch scroll, capture loss) is not a click, so it
+    // must not step the speed -- just re-settle the skip map.
+    if (cancelled) {
+      if (skipSilence) rebaseSkipSilence();
+    } else {
+      // A drag under CLICK_PX steps from the speed the drag started at, snapped
+      // to a quarter, instead of from a 1-2 px wobble (which gave 1.26x).
+      setSpeedUI(speedAfterDrag(start, dx));
+    }
     refreshClipDurations();
   };
   dial.addEventListener("pointerup", () => endDrag(false));
@@ -726,11 +863,11 @@ document.addEventListener("keydown", (e) => {
   dial.addEventListener("keydown", (e) => {
     if (e.key === "ArrowRight" || e.key === "ArrowUp") {
       e.preventDefault();
-      setSpeedUI(speedValue + 0.25);
+      setSpeedUI(stepSpeed(speedValue, 1));
       refreshClipDurations();
     } else if (e.key === "ArrowLeft" || e.key === "ArrowDown") {
       e.preventDefault();
-      setSpeedUI(speedValue - 0.25);
+      setSpeedUI(stepSpeed(speedValue, -1));
       refreshClipDurations();
     } else if (e.key === "Home" || e.key === "0") {
       e.preventDefault();
@@ -748,7 +885,7 @@ $("saveBackup").addEventListener("click", async () => {
   await withBusy("Saving backup…", async () => {
     try {
       const out = encode(state.pcm, state.sampleRate, "wav");
-      downloadBlob(out, `${(state.sourceName || "recording").replace(/\..+$/, "")}-backup.wav`);
+      downloadBlob(out, backupName(state.sourceName));
       markSaved();
     } catch (err) {
       $("saveStatus").textContent = `Backup failed: ${err.message}`;
@@ -822,6 +959,18 @@ function mergeTranscript(existing, fresh, scope) {
 // ── Transcription ─────────────────────────────────────────────────────────────
 $("transcribeBtn").addEventListener("click", async () => {
   if (!state.pcm) return;
+  // Warn before the first model download: it is 40-250 MB and the app
+  // otherwise gives no hint that anything is fetched (TX-13).
+  if (!modelNoteShown) {
+    modelNoteShown = true;
+    const size = MODEL_SIZES[$("modelSel").value] || "tens to hundreds of megabytes";
+    const free = await freeStorageText();
+    const ok = confirm(
+      `The transcription model is about ${size} and is downloaded once from the CDN, then cached ` +
+        `by the browser. Nothing is uploaded.${free ? ` Free storage: ${free}.` : ""}\n\nContinue?`
+    );
+    if (!ok) return;
+  }
   // Transcribing is CPU-heavy (WASM/Whisper); never overlap it with playback.
   if (player.playing) {
     player.stop();
@@ -840,18 +989,38 @@ $("transcribeBtn").addEventListener("click", async () => {
   const duration = scope.pcm.length / state.sampleRate;
   const prefixStatus = (status) =>
     status.startsWith("Transcribing") ? status.replace(/^Transcribing/, `Transcribing ${scope.label}`) : status;
+  // Model download/load occupies the first 60% of the bar. transformers.js
+  // reports progress per file, so aggregate the byte counts across files and
+  // clamp the result monotonic: the bar used to jump backwards every time a new
+  // file joined the download (TX-10).
+  const loadFiles = new Map();
+  let loadFrac = 0;
+  const onLoadProgress = (p) => {
+    if (!p) return;
+    const file = p.file || p.name || "model";
+    if (typeof p.loaded === "number" && typeof p.total === "number" && p.total > 0) {
+      loadFiles.set(file, { loaded: p.loaded, total: p.total });
+    } else if (typeof p.progress === "number") {
+      const f = p.progress > 1 ? p.progress / 100 : p.progress;
+      loadFiles.set(file, { loaded: Math.min(1, f), total: 1 });
+    } else {
+      return;
+    }
+    let loaded = 0;
+    let total = 0;
+    for (const v of loadFiles.values()) {
+      loaded += v.loaded;
+      total += v.total;
+    }
+    if (total <= 0) return;
+    loadFrac = Math.max(loadFrac, 0.6 * Math.min(1, loaded / total));
+    txFrac(loadFrac);
+  };
   try {
     const raw = await transcribe(scope.pcm, state.sampleRate, $("modelSel").value, {
       language: $("langSel").value || undefined,
-      device: $("webgpuChk").checked ? "webgpu" : undefined,
       onStatus: (s) => ($("txStatus").textContent = prefixStatus(s)),
-      onProgress: (p) => {
-        // Model download/load occupies the first 60%.
-        if (p && p.progress != null) {
-          const loadFrac = p.progress > 1 ? p.progress / 100 : p.progress;
-          txFrac(0.6 * loadFrac);
-        }
-      },
+      onProgress: onLoadProgress,
       onSegment: (segment) => {
         // `end` is the end of the completed sequential input window, so this is
         // real file-fraction progress rather than an estimate.
@@ -871,9 +1040,7 @@ $("transcribeBtn").addEventListener("click", async () => {
     $("txActions").style.display = "flex";
     if (raw.stalled) {
       const pct = Math.round(100 * Math.min(1, (raw.completedSeconds || 0) / duration));
-      $("txStatus").textContent = `Partial transcript (WebGPU stalled at ${pct}%). Uncheck WebGPU and re-run to finish.`;
-      const gpu = $("webgpuChk");
-      if (gpu) gpu.checked = false;
+      $("txStatus").textContent = `Partial transcript (stopped at ${pct}% — inference stalled). Re-run to finish.`;
     } else {
       $("txStatus").textContent = state.transcript.timestamped
         ? "Done"
@@ -941,6 +1108,7 @@ function renderTranscript(result) {
   const words = (result.chunks || []).filter((c) => c.timestamp);
   if (words.length === 0) {
     el.textContent = result.text || "(empty)";
+    updateTranscriptActions();
     return;
   }
   let group = [];
@@ -962,7 +1130,8 @@ function renderTranscript(result) {
       if (player.playing) player.play(sample, currentSpeed());
     });
     div.addEventListener("dblclick", async () => {
-      if (!state.pcm) return;
+      // Double-click must not start playback while Whisper is running (TX-12).
+      if (!state.pcm || transcribing) return;
       const sample = Math.round(start * state.sampleRate);
       state.cursorSample = sample;
       waveform.setPlayhead(sample);
@@ -981,16 +1150,36 @@ function renderTranscript(result) {
     if (line.length >= TARGET_TRANSCRIPT_CHARS || /[.!?]\s*$/.test(w.text)) flush();
   }
   flush();
+  updateTranscriptActions();
 }
 
-$("downloadTx").addEventListener("click", () => {
-  if (!state.transcript) return;
-  downloadBlob(new Blob([state.transcript.text || ""], { type: "text/plain" }), "transcript.txt");
-});
-$("downloadSrt").addEventListener("click", () => {
-  if (!state.transcript) return;
-  downloadBlob(new Blob([toSrt(state.transcript.chunks)], { type: "text/plain" }), "transcript.srt");
-});
+/** Enable the transcript downloads that have something to write (TX-11). */
+function updateTranscriptActions() {
+  const t = state.transcript;
+  const hasWords = !!(t && t.chunks && t.chunks.length);
+  const set = (id, on) => {
+    const el = $(id);
+    if (el) el.disabled = !on;
+  };
+  set("downloadTx", !!t);
+  set("downloadSrt", hasWords);
+  set("downloadVtt", hasWords);
+}
+
+function transcriptDownload(kind) {
+  const t = state.transcript;
+  if (!t) return;
+  const body = kind === "srt" ? toSrt(t.chunks) : kind === "vtt" ? toVtt(t.chunks) : toTxt(t);
+  if (!body) {
+    $("txStatus").textContent = "Nothing timestamped to export";
+    return;
+  }
+  downloadBlob(new Blob([body], { type: kind === "vtt" ? "text/vtt" : "text/plain" }), `transcript.${kind}`);
+}
+
+$("downloadTx").addEventListener("click", () => transcriptDownload("txt"));
+$("downloadSrt").addEventListener("click", () => transcriptDownload("srt"));
+$("downloadVtt").addEventListener("click", () => transcriptDownload("vtt"));
 
 // ── Export ────────────────────────────────────────────────────────────────────
 function currentClipNames() {
@@ -1014,6 +1203,21 @@ function renderClipList() {
   let mapper = null;
   try {
     mapper = makeExportMap();
+  } catch (err) {
+    // Building the map used to throw straight through onSplitsChange, which
+    // broke adding splits entirely (EX-7). Show why and disable the exports.
+    list.innerHTML = `<span class="muted">Clip lengths unavailable — ${err.message}. Uncheck speed-baked to export.</span>`;
+    for (const id of ["exportAll", "exportClips"]) {
+      $(id).disabled = true;
+      $(id).title = `Unavailable: ${err.message}`;
+    }
+    return;
+  }
+  for (const id of ["exportAll", "exportClips"]) {
+    $(id).disabled = false;
+    $(id).title = "";
+  }
+  try {
     const clips = buildClips(state.splits, state.pcm.length);
     clips.forEach((c, i) => {
       const row = document.createElement("div");
@@ -1034,7 +1238,7 @@ function renderClipList() {
           try {
             const range = mapClipForExport(c);
             if (range.end > range.start) {
-              exportSlice(range.pcm, state.sampleRate, range.start, range.end, fmtSel, `${name}.${fmtSel}`);
+              exportSlice(range.pcm, state.sampleRate, range.start, range.end, fmtSel, clipExportName(state.sourceName, name, fmtSel));
               $("exportStatus").textContent = `Exported ${name}.${fmtSel}`;
             } else {
               $("exportStatus").textContent = "Clip is empty after baking — nothing to export";
@@ -1168,10 +1372,13 @@ $("exportAll").addEventListener("click", async () => {
       }
       const baked = useBakedExport();
       const skip = useSkipExport();
-      const base = (state.sourceName || "recording").replace(/\s+/g, " ");
-      const suffix = skip ? "nosilence" : `${speedValue.toFixed(2)}x`;
-      const name = baked || skip ? `${base}-${suffix}` : base;
-      exportSlice(src.pcm, src.sampleRate, 0, src.pcm.length, fmtSel, `${name}.${fmtSel}`);
+      // Keep the speed in the name even when silence is skipped too (EX-5).
+      const name = wholeExportName(state.sourceName, { baked, skip, speed: speedValue, format: fmtSel });
+      // Async encode: MP3 of a long file used to freeze the page for minutes.
+      const blob = await encodeAsync(src.pcm, src.sampleRate, fmtSel, (f) => {
+        $("exportStatus").textContent = `Encoding ${Math.round(f * 100)}%…`;
+      });
+      downloadBlob(blob, name);
       // Only an unprocessed WAV actually preserves the recording; a baked,
       // silence-stripped or MP3 export does not.
       if (!baked && !skip && fmtSel === "wav") markSaved();
@@ -1191,7 +1398,6 @@ $("exportClips").addEventListener("click", async () => {
   const fmtSel = $("exportFormat").value;
   await withBusy("Exporting clips…", async () => {
     const names = currentClipNames();
-    const base = (state.sourceName || "recording").replace(/\.[^.]+$/, "").replace(/\s+/g, " ");
     let ranges;
     let mapper = null;
     try {
@@ -1224,7 +1430,7 @@ $("exportClips").addEventListener("click", async () => {
             range.start,
             range.end,
             fmtSel,
-            `${base}-${range.name}.${fmtSel}`
+            clipExportName(state.sourceName, range.name, fmtSel)
           );
           count++;
         }
@@ -1238,6 +1444,7 @@ $("exportClips").addEventListener("click", async () => {
 
 // ── Boot ────────────────────────────────────────────────────────────────────
 window.addEventListener("beforeunload", (e) => {
+  closeStorage();
   // A recording in progress is only partly persisted, and closing mid-capture
   // would lose the live stream entirely.
   const recording = typeof recorder !== "undefined" && recorder.status() !== "idle";
@@ -1258,16 +1465,6 @@ window.addEventListener("beforeunload", (e) => {
   renderClipList();
   $("cursorTime").textContent = "—";
   refreshDevices();
-
-  // The WebGPU toggle is meaningless without a WebGPU adapter.
-  if (!navigator.gpu) {
-    const gpu = $("webgpuChk");
-    if (gpu) {
-      gpu.disabled = true;
-      const label = gpu.closest("label");
-      if (label) label.title = "WebGPU is not available in this browser";
-    }
-  }
 
   // Offer the most recent autosaved session instead of silently dropping it.
   // The banner stays until an explicit choice; the slot is not overwritten by a

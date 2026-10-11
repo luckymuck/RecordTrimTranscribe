@@ -53,8 +53,10 @@ export function timeStretchSkipSilence(pcm, sampleRate, speed, classAware, minSi
 }
 
 /**
- * Silence runs longer than `minSilenceS`, as `{start, end}` in samples, each
- * trimmed by `keepSilenceS` at its end.
+ * Silence runs longer than `minSilenceS`, as `{start, end}` in samples.
+ *
+ * Raw detected edges: the caller applies the speed-dependent inset on *both*
+ * sides when it builds the gap map, so changing speed never re-scans.
  * @returns {{start: number, end: number}[]}
  */
 export function silenceZones(pcm, sampleRate, minSilenceS, keepSilenceS) {

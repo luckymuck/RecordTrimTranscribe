@@ -1,5 +1,6 @@
 // Canvas waveform viewer: overview + zoomable main view, playhead, and split markers.
 // Concepts adapted from the AudioSplitter.html waveform viewer.
+import { isValidSplit } from "../export/boundaries.js";
 
 const MAX_BUCKETS = 40000;
 // Grab radius for a split, in CSS pixels. Both the drag hit test and the
@@ -64,16 +65,19 @@ export class WaveformView {
 
   /**
    * Replace the audio without resetting splits, labels, or the playhead —
-   * for in-place edits like normalization.
+   * for in-place edits like normalization. The zoom is kept too: normalizing
+   * used to throw the user's view away (WF-9).
    */
   refreshData(pcm, sampleRate) {
     this._hideCtxMenu();
+    const prevStart = this.viewStart;
+    const prevLen = this.viewLen;
     this.pcm = pcm;
     this.sampleRate = sampleRate;
     this.duration = pcm.length / sampleRate;
     this._computePeaks();
-    this.viewStart = 0;
-    this.viewLen = pcm.length;
+    this.viewLen = Math.max(64, Math.min(prevLen || pcm.length, pcm.length));
+    this.viewStart = Math.max(0, Math.min(pcm.length - this.viewLen, prevStart || 0));
     this._resize();
   }
 
@@ -90,25 +94,41 @@ export class WaveformView {
     return !!this.pcm;
   }
 
+  /**
+   * Peak envelope, computed in slices so an hour-long file does not stall the
+   * UI (WF-13). Uncomputed buckets stay NaN and the draws skip them, so the
+   * envelope fills in progressively instead of showing a false flat line.
+   */
   _computePeaks() {
     const n = this.pcm.length;
     this.bucket = Math.max(1, Math.ceil(n / MAX_BUCKETS));
     const nb = Math.ceil(n / this.bucket);
-    this.mins = new Float32Array(nb);
-    this.maxs = new Float32Array(nb);
-    for (let b = 0; b < nb; b++) {
-      const s = b * this.bucket;
-      const e = Math.min(n, s + this.bucket);
-      let mn = 1e9,
-        mx = -1e9;
-      for (let i = s; i < e; i++) {
-        const v = this.pcm[i];
-        if (v < mn) mn = v;
-        if (v > mx) mx = v;
+    this.mins = new Float32Array(nb).fill(NaN);
+    this.maxs = new Float32Array(nb).fill(NaN);
+    const token = (this._peaksToken = (this._peaksToken || 0) + 1);
+    const perSlice = Math.max(1, Math.ceil(2e6 / this.bucket));
+    let b = 0;
+    const step = () => {
+      // Superseded by a newer source, or the data went away.
+      if (token !== this._peaksToken || !this.pcm) return;
+      const until = Math.min(nb, b + perSlice);
+      for (; b < until; b++) {
+        const s = b * this.bucket;
+        const e = Math.min(n, s + this.bucket);
+        let mn = Infinity;
+        let mx = -Infinity;
+        for (let i = s; i < e; i++) {
+          const v = this.pcm[i];
+          if (v < mn) mn = v;
+          if (v > mx) mx = v;
+        }
+        this.mins[b] = mn;
+        this.maxs[b] = mx;
       }
-      this.mins[b] = mn;
-      this.maxs[b] = mx;
-    }
+      this.draw();
+      if (b < nb) setTimeout(step, 0);
+    };
+    step();
   }
 
   _resize() {
@@ -176,6 +196,9 @@ export class WaveformView {
   }
 
   drawPlayhead() {
+    // The overview carries its own playhead marker, so it has to be repainted
+    // when the cursor moves (WF-12). It is a small canvas; this is cheap.
+    if (this.pcm) this._drawOverview();
     if (!this.pcm || this.playhead < 0) {
       this.playheadEl.style.display = "none";
       return;
@@ -218,12 +241,18 @@ export class WaveformView {
       const e = Math.min(this.pcm.length, Math.floor((x + 1) * step));
       const b0 = Math.max(0, Math.min(lastBucket, Math.floor(s / this.bucket)));
       const b1 = Math.max(b0, Math.min(lastBucket, Math.floor(Math.max(s, e - 1) / this.bucket)));
-      let mn = 1,
-        mx = -1;
+      let mn = Infinity;
+      let mx = -Infinity;
+      let seen = false;
       for (let b = b0; b <= b1; b++) {
-        if (this.mins[b] < mn) mn = this.mins[b];
-        if (this.maxs[b] > mx) mx = this.maxs[b];
+        const lo = this.mins[b];
+        const hi = this.maxs[b];
+        if (Number.isNaN(lo) || Number.isNaN(hi)) continue;
+        seen = true;
+        if (lo < mn) mn = lo;
+        if (hi > mx) mx = hi;
       }
+      if (!seen) continue; // this slice of the envelope is not computed yet
       ctx.fillRect(x, mid - mx * mid, 1, (mx - mn) * mid || 1);
     }
     // view window highlight
@@ -238,6 +267,25 @@ export class WaveformView {
     ctx.moveTo(vx + vw, 0);
     ctx.lineTo(vx + vw, h);
     ctx.stroke();
+    // Splits and playhead, so the overview shows where the cuts and the cursor
+    // are without having to look at the main view (WF-12).
+    ctx.lineWidth = Math.max(1, window.devicePixelRatio || 1);
+    ctx.strokeStyle = "#ffb454";
+    for (const s of this.splits) {
+      const x = (s / this.pcm.length) * w;
+      ctx.beginPath();
+      ctx.moveTo(x, 0);
+      ctx.lineTo(x, h);
+      ctx.stroke();
+    }
+    if (this.playhead >= 0) {
+      const px = (this.playhead / this.pcm.length) * w;
+      ctx.strokeStyle = "#7c9cff";
+      ctx.beginPath();
+      ctx.moveTo(px, 0);
+      ctx.lineTo(px, h);
+      ctx.stroke();
+    }
   }
 
   _drawMain() {
@@ -268,12 +316,18 @@ export class WaveformView {
         const e = s + spp;
         const b0 = Math.floor(s / this.bucket);
         const b1 = Math.min(this.mins.length - 1, Math.floor(e / this.bucket));
-        let mn = 1,
-          mx = -1;
+        let mn = Infinity;
+        let mx = -Infinity;
+        let seen = false;
         for (let b = b0; b <= b1; b++) {
-          if (this.mins[b] < mn) mn = this.mins[b];
-          if (this.maxs[b] > mx) mx = this.maxs[b];
+          const lo = this.mins[b];
+          const hi = this.maxs[b];
+          if (Number.isNaN(lo) || Number.isNaN(hi)) continue;
+          seen = true;
+          if (lo < mn) mn = lo;
+          if (hi > mx) mx = hi;
         }
+        if (!seen) continue; // envelope slice not computed yet
         const y0 = mid - mx * mid;
         const y1 = mid - mn * mid;
         ctx.fillRect(x, y0, 1, Math.max(1, y1 - y0));
@@ -331,37 +385,58 @@ export class WaveformView {
     }
   }
 
+  /**
+   * Split labels. Reuses a pool of elements instead of rebuilding with
+   * innerHTML on every redraw, culls labels outside the view, and skips labels
+   * that would overlap the previous one (WF-11).
+   */
   _drawLabels() {
-    this.labelsEl.innerHTML = "";
-    if (!this.pcm || this.splits.length === 0) return;
-    const font = "10px ui-monospace, Consolas, monospace";
-    this._measureCtx.font = font;
+    const pool = (this._labelPool = this._labelPool || []);
+    if (!this.pcm || this.splits.length === 0) {
+      for (const el of pool) if (el.isConnected) el.remove();
+      return;
+    }
+    this._measureCtx.font = "10px ui-monospace, Consolas, monospace";
     const width = this.main.clientWidth;
-    const escapeHtml = (value) =>
-      value
-        .replace(/&/g, "&amp;")
-        .replace(/</g, "&lt;")
-        .replace(/>/g, "&gt;")
-        .replace(/"/g, "&quot;")
-        .replace(/'/g, "&#39;");
+    let used = 0;
+    let prevRight = -Infinity;
     for (let i = 0; i < this.splits.length; i++) {
+      const sx = this.sampleToX(this.splits[i]);
+      if (sx < -40 || sx > width + 40) continue; // off screen
       const text = this.splitLabels[i] || "";
-      const label = document.createElement("span");
-      label.className = "split-label";
-      if (text) {
-        const [timePart, ...rest] = text.split("-");
-        label.innerHTML = `<span class="t">${timePart}</span>` + (rest.length ? "-" + escapeHtml(rest.join("-")) : "");
-      } else {
-        label.textContent = "";
-      }
-      let x = this.sampleToX(this.splits[i]) + 5;
       const w = this._measureCtx.measureText(text).width + 14;
+      let x = sx + 5;
+      let flip = false;
       if (x + w > width - 2) {
-        x = this.sampleToX(this.splits[i]) - 5;
-        label.style.transform = "translateX(-100%)";
+        x = sx - 5;
+        flip = true;
       }
+      const left = flip ? x - w : x;
+      if (left < prevRight + 2) continue; // would overlap the previous label
+      prevRight = left + w;
+      let label = pool[used];
+      if (!label) {
+        label = document.createElement("span");
+        label.className = "split-label";
+        pool.push(label);
+      }
+      used++;
+      if (label._text !== text) {
+        label._text = text;
+        label.textContent = "";
+        const [timePart, ...rest] = text.split("-");
+        const t = document.createElement("span");
+        t.className = "t";
+        t.textContent = timePart;
+        label.appendChild(t);
+        if (rest.length) label.appendChild(document.createTextNode("-" + rest.join("-")));
+      }
+      label.style.transform = flip ? "translateX(-100%)" : "";
       label.style.left = x + "px";
-      this.labelsEl.appendChild(label);
+      if (!label.isConnected) this.labelsEl.appendChild(label);
+    }
+    for (let i = used; i < pool.length; i++) {
+      if (pool[i].isConnected) pool[i].remove();
     }
   }
 
@@ -431,6 +506,10 @@ export class WaveformView {
       if (hit >= 0) {
         e.preventDefault();
         this.showContextMenu(e.clientX, e.clientY, hit);
+      } else if (e.ctrlKey || e.metaKey) {
+        // Ctrl+click on macOS is a right-click; it adds a split, so the native
+        // menu must not appear over it (WF-10).
+        e.preventDefault();
       }
     });
 
@@ -544,17 +623,35 @@ export class WaveformView {
     main.addEventListener("pointercancel", cancelDrag);
     main.addEventListener("lostpointercapture", cancelDrag);
 
-    this.overview.addEventListener("pointerdown", (e) => {
-      if (!this.pcm) return;
-      const rect = this.overview.getBoundingClientRect();
-      const frac = (e.clientX - rect.left) / rect.width;
-      const centre = frac * this.pcm.length;
-      this.viewStart = centre - this.viewLen / 2;
+    // The overview is draggable: click or drag to bring that part of the
+    // recording into view (WF-12).
+    const overview = this.overview;
+    const centreOn = (clientX) => {
+      const rect = overview.getBoundingClientRect();
+      const frac = Math.max(0, Math.min(1, (clientX - rect.left) / rect.width));
+      this.viewStart = frac * this.pcm.length - this.viewLen / 2;
       this._clampView();
       this.followPlayhead = true;
       this.draw();
       this.onViewChange(this._zoomLabel());
+    };
+    overview.addEventListener("pointerdown", (e) => {
+      if (!this.pcm) return;
+      e.preventDefault();
+      overview.setPointerCapture(e.pointerId);
+      this._overviewDrag = true;
+      centreOn(e.clientX);
     });
+    overview.addEventListener("pointermove", (e) => {
+      if (!this.pcm || !this._overviewDrag) return;
+      centreOn(e.clientX);
+    });
+    const endOverviewDrag = () => {
+      this._overviewDrag = false;
+    };
+    overview.addEventListener("pointerup", endOverviewDrag);
+    overview.addEventListener("pointercancel", endOverviewDrag);
+    overview.addEventListener("lostpointercapture", endOverviewDrag);
   }
 
   _clampView() {
@@ -565,7 +662,12 @@ export class WaveformView {
 
   addSplit(sample) {
     this._hideCtxMenu();
-    this.splits.push(Math.round(sample));
+    // WF-2: reject splits at the very start/end and duplicates, so the labels
+    // and the clip list can never disagree about how many splits there are.
+    const v = Math.round(sample);
+    if (!isValidSplit(v, this.pcm ? this.pcm.length : 0)) return;
+    if (this.splits.includes(v)) return;
+    this.splits.push(v);
     this.splits.sort((a, b) => a - b);
     this.onSplitsChange(this.splits);
     this.draw();
