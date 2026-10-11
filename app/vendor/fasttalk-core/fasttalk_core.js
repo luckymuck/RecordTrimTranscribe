@@ -195,6 +195,41 @@ export function analyze(samples, sample_rate) {
 }
 
 /**
+ * Consonant boost: a high-shelf above `corner_hz` plus light high-band
+ * compression (S-4). `amount` (0..1) scales the compression.
+ * @param {Float32Array} samples
+ * @param {number} sample_rate
+ * @param {number} corner_hz
+ * @param {number} gain_db
+ * @param {number} amount
+ * @returns {Float32Array}
+ */
+export function consonant_boost(samples, sample_rate, corner_hz, gain_db, amount) {
+    const ptr0 = passArrayF32ToWasm0(samples, wasm.__wbindgen_malloc);
+    const len0 = WASM_VECTOR_LEN;
+    const ret = wasm.consonant_boost(ptr0, len0, sample_rate, corner_hz, gain_db, amount);
+    var v2 = getArrayF32FromWasm0(ret[0], ret[1]).slice();
+    wasm.__wbindgen_free(ret[0], ret[1] * 4, 4);
+    return v2;
+}
+
+/**
+ * Rumble/hum high-pass, applied to the source before stretching (S-5).
+ * @param {Float32Array} samples
+ * @param {number} sample_rate
+ * @param {number} cutoff_hz
+ * @returns {Float32Array}
+ */
+export function highpass(samples, sample_rate, cutoff_hz) {
+    const ptr0 = passArrayF32ToWasm0(samples, wasm.__wbindgen_malloc);
+    const len0 = WASM_VECTOR_LEN;
+    const ret = wasm.highpass(ptr0, len0, sample_rate, cutoff_hz);
+    var v2 = getArrayF32FromWasm0(ret[0], ret[1]).slice();
+    wasm.__wbindgen_free(ret[0], ret[1] * 4, 4);
+    return v2;
+}
+
+/**
  * Silence runs longer than `min_silence_s`, as flat `[start, end, ...]` sample
  * positions. Boundaries are the raw detected silence edges; the caller insets
  * them by the speed-dependent keep.
@@ -212,6 +247,22 @@ export function silence_zones(samples, sample_rate, min_silence_s) {
     const ret = wasm.silence_zones(ptr0, len0, sample_rate, min_silence_s);
     var v2 = getArrayF64FromWasm0(ret[0], ret[1]).slice();
     wasm.__wbindgen_free(ret[0], ret[1] * 8, 8);
+    return v2;
+}
+
+/**
+ * Soft limiter to `ceiling_db` (S-13).
+ * @param {Float32Array} samples
+ * @param {number} sample_rate
+ * @param {number} ceiling_db
+ * @returns {Float32Array}
+ */
+export function soft_limiter(samples, sample_rate, ceiling_db) {
+    const ptr0 = passArrayF32ToWasm0(samples, wasm.__wbindgen_malloc);
+    const len0 = WASM_VECTOR_LEN;
+    const ret = wasm.soft_limiter(ptr0, len0, sample_rate, ceiling_db);
+    var v2 = getArrayF32FromWasm0(ret[0], ret[1]).slice();
+    wasm.__wbindgen_free(ret[0], ret[1] * 4, 4);
     return v2;
 }
 

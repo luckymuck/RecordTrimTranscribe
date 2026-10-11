@@ -11,11 +11,16 @@ use wasm_bindgen::prelude::*;
 
 use crate::classes::{profile_for, Class};
 use crate::engines::{hybrid, psola};
+use crate::enhance;
 use crate::rate;
 use crate::timing::TimeMap;
 
 fn to_f64(samples: &[f32]) -> Vec<f64> {
     samples.iter().map(|v| *v as f64).collect()
+}
+
+fn to_f32(samples: Vec<f64>) -> Vec<f32> {
+    samples.into_iter().map(|v| v as f32).collect()
 }
 
 /// Ratio (`out/in`) for a requested speed-up (`speed >= 1` means faster).
@@ -294,6 +299,37 @@ pub fn analyze(samples: &[f32], sample_rate: u32) -> String {
 #[wasm_bindgen]
 pub fn silence_zones(samples: &[f32], sample_rate: u32, min_silence_s: f64) -> Vec<f64> {
     rate::silence_zones_f32(samples, sample_rate, min_silence_s)
+}
+
+/// Rumble/hum high-pass, applied to the source before stretching (S-5).
+#[wasm_bindgen]
+pub fn highpass(samples: &[f32], sample_rate: u32, cutoff_hz: f64) -> Vec<f32> {
+    to_f32(enhance::highpass(&to_f64(samples), sample_rate, cutoff_hz))
+}
+
+/// Consonant boost: a high-shelf above `corner_hz` plus light high-band
+/// compression (S-4). `amount` (0..1) scales the compression.
+#[wasm_bindgen]
+pub fn consonant_boost(
+    samples: &[f32],
+    sample_rate: u32,
+    corner_hz: f64,
+    gain_db: f64,
+    amount: f64,
+) -> Vec<f32> {
+    to_f32(enhance::consonant_boost(
+        &to_f64(samples),
+        sample_rate,
+        corner_hz,
+        gain_db,
+        amount,
+    ))
+}
+
+/// Soft limiter to `ceiling_db` (S-13).
+#[wasm_bindgen]
+pub fn soft_limiter(samples: &[f32], sample_rate: u32, ceiling_db: f64) -> Vec<f32> {
+    to_f32(enhance::soft_limiter(&to_f64(samples), sample_rate, ceiling_db))
 }
 
 /// Offline render with silence longer than `min_silence_s` cut down to a `keep_s`

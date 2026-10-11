@@ -6,6 +6,7 @@
 pub mod api;
 pub mod classes;
 pub mod engines;
+pub mod enhance;
 pub mod filters;
 pub mod pitch;
 pub mod rate;
