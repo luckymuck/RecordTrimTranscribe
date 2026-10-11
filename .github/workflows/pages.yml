@@ -23,6 +23,23 @@ jobs:
     steps:
       - name: Check out repository
         uses: actions/checkout@v4
+      - name: Check the vendored WASM is present
+        # The site loads app/vendor/fasttalk-core/fasttalk_core_bg.wasm, which is
+        # built locally by build-wasm.bat and committed (wasm-pack writes a
+        # .gitignore containing '*' next to it). If a rebuild was forgotten or
+        # the output never got added, the deployed site silently loses the DSP.
+        run: |
+          wasm=app/vendor/fasttalk-core/fasttalk_core_bg.wasm
+          if [ ! -f "$wasm" ]; then
+            echo "::error::$wasm is missing. Run build-wasm.bat and commit the output."
+            exit 1
+          fi
+          size=$(stat -c%s "$wasm")
+          if [ "$size" -lt 100000 ]; then
+            echo "::error::$wasm is only $size bytes; the build output looks truncated."
+            exit 1
+          fi
+          echo "$wasm is $size bytes"
       - name: Configure Pages
         uses: actions/configure-pages@v5
         with:

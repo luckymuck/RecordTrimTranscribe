@@ -74,10 +74,13 @@ export class Player {
    * Sorted defensively so the mapping can assume order.
    */
   setSkipMap(zones) {
+    // Round to whole samples. `silence_zones` returns f64 positions: at odd
+    // rates (11025 Hz) `keep / 2` is fractional, and the fractional tail would
+    // drift the feed by a sample per gap.
     this.gaps = Array.isArray(zones)
       ? zones
+          .map((z) => (z ? { start: Math.round(z.start), end: Math.round(z.end) } : null))
           .filter((z) => z && z.end > z.start)
-          .map((z) => ({ start: z.start, end: z.end }))
           .sort((a, b) => a.start - b.start)
       : [];
     // Cumulative lengths so the position maps are binary searches rather than
@@ -277,6 +280,14 @@ export class Player {
       if (!chunk) {
         this._scheduleEnd();
         return;
+      }
+      // Rendering is synchronous and the first chunk is a full 0.2 s, which at
+      // 4x takes about as long as MIN_LEAD. If the grid has fallen behind the
+      // audio clock, re-anchor it instead of starting a buffer in the past: a
+      // late `start(when)` plays immediately and overlaps the next buffer.
+      const afterRender = this.ctx.currentTime;
+      if (this.scheduleTime < afterRender + MIN_LEAD) {
+        this.scheduleTime = afterRender + MIN_LEAD;
       }
       const buf = this.ctx.createBuffer(1, chunk.length, this.sr);
       buf.copyToChannel(chunk, 0);

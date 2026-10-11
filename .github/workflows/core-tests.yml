@@ -1,0 +1,41 @@
+name: Core tests
+
+# The Rust crate carries the regression suites for the DSP -- seam continuity,
+# skip/map agreement, class-aware length, odd sample rates. Nothing else runs
+# them, so a change to core/src could otherwise reach the deployed site unbuilt
+# and untested.
+
+on:
+  push:
+    branches: ["main"]
+    paths:
+      - "core/**"
+      - ".github/workflows/core-tests.yml"
+  pull_request:
+    paths:
+      - "core/**"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: core
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+      - name: Cache cargo registry and target
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            core/target
+          key: core-${{ runner.os }}-${{ hashFiles('core/Cargo.toml') }}
+          restore-keys: core-${{ runner.os }}-
+      - name: Run test suite
+        run: cargo test --release
