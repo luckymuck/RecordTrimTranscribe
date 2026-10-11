@@ -4,8 +4,11 @@ import init, {
   SkipBakedMap,
   StreamStretcher,
   analyze,
+  consonant_boost,
+  highpass,
   initSync,
   silence_zones,
+  soft_limiter,
   time_stretch,
   time_stretch_skip_silence,
   version,
@@ -14,9 +17,9 @@ import init, {
 let ready = false;
 let dspVersion = "?";
 
-export async function initDsp() {
+export async function initDsp(moduleOrPath) {
   if (ready) return;
-  await init();
+  await init(moduleOrPath);
   dspVersion = version();
   ready = true;
 }
@@ -70,6 +73,21 @@ export function silenceZones(pcm, sampleRate, minSilenceS, keepSilenceS) {
 
 export function analyzeClip(pcm, sampleRate) {
   return JSON.parse(analyze(pcm, sampleRate));
+}
+
+/** Rumble/hum high-pass (S-5). */
+export function highpassFilter(pcm, sampleRate, cutoffHz) {
+  return highpass(pcm, sampleRate, cutoffHz);
+}
+
+/** Consonant boost: high-shelf plus light high-band compression (S-4). */
+export function consonantBoost(pcm, sampleRate, cornerHz, gainDb, amount) {
+  return consonant_boost(pcm, sampleRate, cornerHz, gainDb, amount);
+}
+
+/** Soft limiter to `ceilingDb` (S-13). */
+export function softLimiter(pcm, sampleRate, ceilingDb) {
+  return soft_limiter(pcm, sampleRate, ceilingDb);
 }
 
 /**

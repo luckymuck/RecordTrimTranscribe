@@ -86,9 +86,22 @@
         <option value="peak" selected>peak</option>
         <option value="rms">rms</option>
       </select>
-      <button class="btn sm" id="normUndo" disabled title="Undo the last normalize (exact)">undo</button>
+      <span class="sep"></span>
+      <button class="btn sm" id="cleanUpBtn" title="Filter rumble, denoise with RNNoise, boost consonants and limit peaks — applied to the recording">clean up</button>
+      <button class="btn sm" id="cleanUpOptsBtn" aria-expanded="false" title="Choose which clean-up stages run">options</button>
+      <button class="btn sm" id="normUndo" disabled title="Undo the last processing step (normalize or clean up)">undo</button>
       <span class="muted" id="splitInfo">0 splits</span>
       <span class="muted time" id="cursorTime">—</span>
+    </div>
+    <div class="row clean-options" id="cleanOptions" hidden>
+      <label class="chk" title="High-pass at 80 Hz: removes rumble, hum and handling noise"><input type="checkbox" id="cleanRumble" checked> rumble filter</label>
+      <label class="chk" title="RNNoise speech denoising. Runs at 48 kHz; the model loads on first use."><input type="checkbox" id="cleanDenoise" checked> denoise</label>
+      <label class="chk" title="Raise consonants relative to vowels: a high-shelf above 2 kHz plus light high-band compression"><input type="checkbox" id="cleanConsonant"> consonant boost</label>
+      <label class="chk">strength
+        <input type="range" id="cleanConsonantDb" min="0" max="6" step="1" value="3" aria-label="Consonant boost strength in dB">
+        <span class="muted" id="cleanConsonantVal">3 dB</span>
+      </label>
+      <label class="chk" title="Peak limiter at −1 dBFS so nothing clips after processing"><input type="checkbox" id="cleanLoudness"> limit peaks</label>
     </div>
     <p class="hint">Scroll to zoom · drag to scroll · click to seek · Ctrl+click to split at that spot · drag a split line to move it · with the waveform focused: arrows move the cursor, Enter adds a split at it</p>
   </section>

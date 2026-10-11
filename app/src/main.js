@@ -1,5 +1,5 @@
 // Application wiring: record/load → waveform → playback → transcribe → export.
-import { initDsp, getDspVersion, makeBakedMap, makeSkipBakedMap, timeStretchSkipSilence, silenceZones } from "./core/dsp.js";
+import { initDsp, getDspVersion, makeBakedMap, makeSkipBakedMap, timeStretchSkipSilence, silenceZones, softLimiter } from "./core/dsp.js";
 import { decodeAudioBlob, audioContext } from "./audio/decode.js";
 import { Recorder } from "./audio/record.js";
 import { encode, encodeAsync, encodeWav } from "./audio/encode.js";
@@ -20,6 +20,7 @@ import {
 import { CLICK_PX, SPEED_MAX, SPEED_MIN, clampSpeed, speedAfterDrag, speedFromDrag, stepSpeed } from "./ui/speed.js";
 import { zoomAnchor, zoomAround } from "./ui/view.js";
 import { applyGain, NORM_PEAK, NORM_RMS_DB, normalizeGain, peakOf } from "./audio/normalize.js";
+import { cleanUp, cleanupActive, cleanupOptions, cleanupSummary } from "./audio/enhance.js";
 
 const $ = (id) => document.getElementById(id);
 
@@ -332,6 +333,10 @@ function setSource(pcm, sampleRate, label, { autosave = true, saved = false, ses
   state.splits = [];
   state.sourceName = label || "recording";
   state.sessionId = sessionId || newSessionId();
+  // A new source invalidates any pending undo (normalize gain or clean-up copy).
+  normalizeUndo = null;
+  cleanupUndo = null;
+  updateUndoButton();
   // Play should start at the beginning of the new source, not wherever the
   // previous one was left.
   state.cursorSample = 0;
@@ -731,10 +736,15 @@ $("clearSplits").addEventListener("click", () => waveform.clearSplits());
   for (const id of ["mainwave", "overview"]) $(id).addEventListener("keydown", onKey);
 }
 
-// ── Normalize ───────────────────────────────────────────────────────────────
-// Undo is exact: normalizing only multiplies, so applying 1/gain in float32
-// restores the original samples without keeping a second copy of the PCM.
+// ── Normalize and clean up ──────────────────────────────────────────────────
+// One undo slot shared by both. Normalize undo is exact and free: normalizing
+// only multiplies, so applying 1/gain in float32 restores the original samples.
+// Clean up is a chain of filters and cannot be inverted, so its undo keeps the
+// previous samples -- a full copy, offered only for recordings short enough
+// that doubling the buffer is safe.
 let normalizeUndo = null;
+let cleanupUndo = null;
+const CLEANUP_UNDO_MAX_SAMPLES = 8 * 1024 * 1024; // ~3 min at 48 kHz (32 MB)
 
 /** Swap in new PCM for the current source and re-settle everything downstream. */
 async function swapSource(newPcm, message) {
@@ -756,10 +766,21 @@ async function swapSource(newPcm, message) {
   $("saveStatus").textContent = message;
 }
 
+function updateUndoButton() {
+  const btn = $("normUndo");
+  if (btn) btn.disabled = !normalizeUndo && !cleanupUndo;
+}
+
 function setNormalizeUndo(gain) {
   normalizeUndo = gain === null ? null : { gain };
-  const btn = $("normUndo");
-  if (btn) btn.disabled = !normalizeUndo;
+  if (normalizeUndo) cleanupUndo = null;
+  updateUndoButton();
+}
+
+function setCleanupUndo(pcm) {
+  cleanupUndo = pcm && pcm.length <= CLEANUP_UNDO_MAX_SAMPLES ? pcm : null;
+  if (cleanupUndo) normalizeUndo = null;
+  updateUndoButton();
 }
 
 $("normBtn").addEventListener("click", async () => {
@@ -782,10 +803,80 @@ $("normBtn").addEventListener("click", async () => {
 });
 
 $("normUndo").addEventListener("click", async () => {
-  if (!state.pcm || !normalizeUndo) return;
+  if (!state.pcm) return;
+  if (cleanupUndo) {
+    const prev = cleanupUndo;
+    cleanupUndo = null;
+    normalizeUndo = null;
+    updateUndoButton();
+    await swapSource(prev, "Clean up undone");
+    return;
+  }
+  if (!normalizeUndo) return;
   const { gain } = normalizeUndo;
-  setNormalizeUndo(null);
+  normalizeUndo = null;
+  updateUndoButton();
   await swapSource(applyGain(state.pcm, 1 / gain), "Normalize undone");
+});
+
+/** The clean-up options as selected in the UI. */
+function currentCleanupOptions() {
+  return cleanupOptions({
+    rumble: $("cleanRumble").checked,
+    denoise: $("cleanDenoise").checked,
+    consonant: $("cleanConsonant").checked,
+    consonantDb: Number($("cleanConsonantDb").value),
+    loudness: $("cleanLoudness").checked,
+  });
+}
+
+$("cleanUpOptsBtn").addEventListener("click", () => {
+  const block = $("cleanOptions");
+  const open = block.hidden;
+  block.hidden = !open;
+  $("cleanUpOptsBtn").setAttribute("aria-expanded", open ? "true" : "false");
+  if (open) {
+    // Preload RNNoise so the first clean-up does not pause on the download, and
+    // disable the toggle with a reason if it cannot load at all.
+    import("./audio/denoise.js")
+      .then((m) => m.loadDenoise())
+      .catch((err) => {
+        const box = $("cleanDenoise");
+        box.checked = false;
+        box.disabled = true;
+        const label = box.closest("label");
+        if (label) label.title = `Denoise unavailable: ${err.message}`;
+      });
+  }
+});
+
+$("cleanConsonantDb").addEventListener("input", () => {
+  $("cleanConsonantVal").textContent = `${$("cleanConsonantDb").value} dB`;
+});
+
+$("cleanUpBtn").addEventListener("click", async () => {
+  if (!state.pcm || state.pcm.length === 0) return;
+  const opts = currentCleanupOptions();
+  if (!cleanupActive(opts)) {
+    $("saveStatus").textContent = cleanupSummary([]);
+    return;
+  }
+  await withBusy("Cleaning up…", async () => {
+    try {
+      const { pcm, steps } = await cleanUp(state.pcm, state.sampleRate, opts, (f) => {
+        $("busyText").textContent = `Denoising… ${Math.round(f * 100)}%`;
+      });
+      if (pcm === state.pcm) {
+        $("saveStatus").textContent = cleanupSummary(steps);
+        return;
+      }
+      setCleanupUndo(state.pcm);
+      const suffix = cleanupUndo ? "" : " (too long to undo)";
+      await swapSource(pcm, cleanupSummary(steps) + suffix);
+    } catch (err) {
+      $("saveStatus").textContent = `Clean up failed: ${err.message}`;
+    }
+  });
 });
 
 // ── Playback ────────────────────────────────────────────────────────────────
@@ -1332,6 +1423,11 @@ function exportSource() {
       pcm: player.bake(speedValue, $("classAware").checked),
       sampleRate: state.sampleRate,
     };
+  }
+  // S-13: a stretched render can overshoot, so limit it before the encoder,
+  // where a clamp would otherwise distort the peaks.
+  if (useBakedExport() || useSkipExport()) {
+    src = { pcm: softLimiter(src.pcm, src.sampleRate, -1), sampleRate: src.sampleRate };
   }
   renderCache = { key, src };
   return src;
