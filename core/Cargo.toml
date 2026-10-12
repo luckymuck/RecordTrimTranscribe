@@ -3,7 +3,7 @@ name = "fasttalk-core"
 version = "0.1.0"
 edition = "2021"
 description = "Browser/WASM port of FastTalk time-scale modification for speech"
-license = "MIT"
+license = "GPL-3.0-only"
 
 [lib]
 crate-type = ["cdylib", "rlib"]
