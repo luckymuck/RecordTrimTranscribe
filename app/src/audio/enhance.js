@@ -38,6 +38,11 @@ export function cleanupOptions(partial) {
   return o;
 }
 
+/** True when the selected chain is exactly one normalize multiplier. */
+export function isGainOnlyCleanup(partial) {
+  const o = cleanupOptions(partial);
+  return o.normalize && !o.rumble && !o.denoise && !o.level && !o.consonant && !o.loudness;
+}
 /** True when at least one stage is selected. */
 export function cleanupActive(partial) {
   const o = cleanupOptions(partial);
@@ -94,7 +99,6 @@ export async function cleanUp(pcm, sampleRate, partial, onProgress) {
     out = softLimiter(out, sampleRate, LIMIT_CEILING_DB);
     steps.push(`limited to ${LIMIT_CEILING_DB} dBFS`);
   }
-  const gainOnly =
-    o.normalize && !o.rumble && !o.denoise && !o.level && !o.consonant && !o.loudness;
+  const gainOnly = isGainOnlyCleanup(o);
   return { pcm: out, steps, gain: gainOnly ? normalizeGain(pcm, o.normalizeMode) : null };
 }

@@ -10,6 +10,7 @@ import {
   cleanupActive,
   cleanupOptions,
   cleanupSummary,
+  isGainOnlyCleanup,
   LIMIT_CEILING_DB,
 } from "../src/audio/enhance.js";
 
@@ -138,6 +139,21 @@ test("cleanUp leaves digital silence silent", async () => {
     loudness: false,
   });
   assert.ok(pcm.every((v) => v === 0), "silence should pass through untouched");
+});
+
+test("isGainOnlyCleanup matches the single-multiplier undo rule", () => {
+  const only = {
+    rumble: false,
+    denoise: false,
+    consonant: false,
+    normalize: true,
+    normalizeMode: "peak",
+    loudness: false,
+  };
+  assert.equal(isGainOnlyCleanup(only), true);
+  assert.equal(isGainOnlyCleanup({ ...only, rumble: true }), false);
+  // A selected consonant stage means the chain is not one multiplier, even at 0 dB.
+  assert.equal(isGainOnlyCleanup({ ...only, consonant: true, consonantDb: 0 }), false);
 });
 
 test("cleanupSummary describes the run", () => {

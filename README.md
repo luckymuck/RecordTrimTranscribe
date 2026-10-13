@@ -49,7 +49,8 @@ build the [portable desktop app](#portable) to use it with no network at all.
 - With the waveform focused: **arrows** nudge the cursor, **Home/End** jump to
   the ends, **Enter** splits at the cursor and **]** removes the nearest split.
 - **Ctrl+Z** / **Ctrl+Y** undo and redo; on macOS **Cmd+Z** and **Cmd+Shift+Z**.
-  Splits and clean-up steps are both undoable.
+  Splits and clean-up steps are both undoable. Long destructive clean-ups save
+  an exact snapshot first, instead of refusing undo past the old in-memory size.
 - **Clean up.** The `clean up` button opens a small options panel and a
   **Run clean-up** button; running it applies the selected stages to the
   recording before anything is stretched, because stretching exaggerates noise
@@ -217,7 +218,7 @@ cargo test            # 71 tests: timing, pitch, PSOLA, WSOLA, streaming, rate,
 node dsp_smoke.mjs    # WASM bindings end-to-end (needs: npx wasm-pack build --target nodejs)
 
 cd ..
-node --test app/test/*.test.mjs   # 69 JS unit tests: transcript formatting,
+node --test app/test/*.test.mjs   # 72 JS unit tests: transcript formatting,
                                   # filenames, split boundaries, dial and zoom
                                   # arithmetic, WAV encoding, normalization,
                                   # the clean-up chain and RNNoise, transcript

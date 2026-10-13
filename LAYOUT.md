@@ -10,7 +10,8 @@ app/                     The whole product surface (static, client-side)
   src/
     core/dsp.js          loads the WASM DSP core, exposes timeStretch/StreamStretcher
     audio/               decode, MediaRecorder capture, WAV + MP3 encoders,
-                         normalization arithmetic, RNNoise denoise, clean-up chain
+                         normalization arithmetic, RNNoise denoise, clean-up chain,
+                         exact undo snapshots
     ui/waveform.js       overview + zoomable waveform, playhead, split markers
     ui/speed.js          speed-dial arithmetic (1.00x-4.00x, no slow-down)
     ui/view.js           zoom/pan arithmetic

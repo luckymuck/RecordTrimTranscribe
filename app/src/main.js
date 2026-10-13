@@ -22,7 +22,8 @@ import {
 import { CLICK_PX, SPEED_MAX, SPEED_MIN, clampSpeed, speedAfterDrag, speedFromDrag, stepSpeed } from "./ui/speed.js";
 import { zoomAnchor, zoomAround } from "./ui/view.js";
 import { applyGain } from "./audio/normalize.js";
-import { cleanUp, cleanupActive, cleanupOptions, cleanupSummary, LEVEL_MAX_BOOST_DB, LEVEL_WINDOW_S } from "./audio/enhance.js";
+import { restorePcmSnapshot, snapshotPcm } from "./audio/undo.js";
+import { cleanUp, cleanupActive, cleanupOptions, cleanupSummary, isGainOnlyCleanup, LEVEL_MAX_BOOST_DB, LEVEL_WINDOW_S } from "./audio/enhance.js";
 
 const $ = (id) => document.getElementById(id);
 
@@ -765,12 +766,14 @@ $("clearSplits").addEventListener("click", () => waveform.clearSplits());
 // ── Normalize and clean up ──────────────────────────────────────────────────
 // Edits go into a history so Ctrl+Z / Ctrl+Y can walk back and forward. A
 // normalize step is stored as its gain -- exact and free, since applying
-// 1/gain in float32 restores the samples. A clean-up step is a chain of
-// filters and cannot be inverted, so it stores the previous samples: a full
-// copy, kept only for recordings short enough to hold one more buffer.
-const CLEANUP_UNDO_MAX_SAMPLES = 8 * 1024 * 1024; // ~3 min at 48 kHz (32 MB)
+// 1/gain in float32 restores the samples. A short clean-up step stores the
+// A long clean-up stores those samples as an exact Blob snapshot instead of
+// keeping a second full buffer in memory. The snapshot lives only as long as
+// its history entry, so there is nothing separate to clean up.
+const CLEANUP_MEMORY_UNDO_MAX_SAMPLES = 8 * 1024 * 1024; // ~3 min at 48 kHz (32 MB)
 const HISTORY_MAX = 20;
 const history = { undo: [], redo: [] };
+let historyBusy = false;
 
 function clearHistory() {
   history.undo.length = 0;
@@ -792,34 +795,71 @@ function applySplits(splits, message) {
   $("saveStatus").textContent = message;
 }
 
-/** Step back one edit. Returns whether anything was undone. */
+/** Step back one edit. Entries leave the stack only after a successful undo. */
 async function undoEdit() {
-  const entry = history.undo.pop();
+  if (historyBusy) return false;
+  const entry = history.undo[history.undo.length - 1];
   if (!entry) return false;
-  if (entry.kind === "gain") {
-    await swapSource(applyGain(state.pcm, 1 / entry.gain), "Normalize undone");
-  } else if (entry.kind === "splits") {
-    applySplits(entry.before, "Split edit undone");
-  } else {
-    await swapSource(entry.before, "Clean up undone");
+  historyBusy = true;
+  try {
+    if (entry.kind === "gain") {
+      await swapSource(applyGain(state.pcm, 1 / entry.gain), "Normalize undone");
+    } else if (entry.kind === "splits") {
+      applySplits(entry.before, "Split edit undone");
+    } else if (entry.kind === "pcm") {
+      await swapSource(entry.before, "Clean up undone");
+    } else if (entry.kind === "pcm-blob") {
+      const pcm = await withBusy("Undoing clean up…", () => restorePcmSnapshot(entry.blob, entry.length));
+      if (entry.sampleRate !== state.sampleRate || pcm.length !== entry.length) {
+        throw new Error("the saved pre-clean-up audio no longer matches this recording");
+      }
+      await swapSource(pcm, "Clean up undone");
+    } else {
+      throw new Error(`unknown history entry: ${entry.kind}`);
+    }
+    history.undo.pop();
+    history.redo.push(entry);
+    return true;
+  } catch (err) {
+    const detail = err && err.message ? err.message : String(err);
+    $("saveStatus").textContent = `Undo failed: ${detail}`;
+    return false;
+  } finally {
+    historyBusy = false;
   }
-  history.redo.push(entry);
-  return true;
 }
 
-/** Step forward one edit. Returns whether anything was redone. */
+/** Step forward one edit. Entries leave the stack only after a successful redo. */
 async function redoEdit() {
-  const entry = history.redo.pop();
+  if (historyBusy) return false;
+  const entry = history.redo[history.redo.length - 1];
   if (!entry) return false;
-  if (entry.kind === "gain") {
-    await swapSource(applyGain(state.pcm, entry.gain), "Normalize redone");
-  } else if (entry.kind === "splits") {
-    applySplits(entry.after, "Split edit redone");
-  } else {
-    await swapSource(entry.after, "Clean up redone");
+  historyBusy = true;
+  try {
+    if (entry.kind === "gain") {
+      await swapSource(applyGain(state.pcm, entry.gain), "Normalize redone");
+    } else if (entry.kind === "splits") {
+      applySplits(entry.after, "Split edit redone");
+    } else if (entry.kind === "pcm") {
+      await swapSource(entry.after, "Clean up redone");
+    } else if (entry.kind === "pcm-blob") {
+      if (!(entry.after instanceof Float32Array) || entry.after.length !== entry.length) {
+        throw new Error("the saved post-clean-up audio is missing");
+      }
+      await swapSource(entry.after, "Clean up redone");
+    } else {
+      throw new Error(`unknown history entry: ${entry.kind}`);
+    }
+    history.redo.pop();
+    history.undo.push(entry);
+    return true;
+  } catch (err) {
+    const detail = err && err.message ? err.message : String(err);
+    $("saveStatus").textContent = `Redo failed: ${detail}`;
+    return false;
+  } finally {
+    historyBusy = false;
   }
-  history.undo.push(entry);
-  return true;
 }
 
 /** Swap in new PCM for the current source and re-settle everything downstream. */
@@ -907,31 +947,72 @@ $("cleanRun").addEventListener("click", async () => {
     $("saveStatus").textContent = "Load or record something first";
     return;
   }
+  if (historyBusy) {
+    $("saveStatus").textContent = "Finish the current edit first";
+    return;
+  }
   const opts = currentCleanupOptions();
   if (!cleanupActive(opts)) {
     $("saveStatus").textContent = cleanupSummary([]);
     return;
   }
-  await withBusy("Cleaning up…", async () => {
-    try {
+  historyBusy = true;
+  try {
+    await withBusy("Cleaning up…", async () => {
       const before = state.pcm;
-      const { pcm, steps, gain } = await cleanUp(before, state.sampleRate, opts, (f) => {
-        $("busyText").textContent = `Denoising… ${Math.round(f * 100)}%`;
-      });
+      let blobUndo = null;
+      let suffix = "";
+      // A long destructive chain cannot keep a second full buffer in memory, so
+      // copy its exact before-state into a Blob snapshot first. Gain-only
+      // normalize is still inverted arithmetically and needs no snapshot.
+      if (before.length > CLEANUP_MEMORY_UNDO_MAX_SAMPLES && !isGainOnlyCleanup(opts)) {
+        try {
+          const blob = await snapshotPcm(before, {
+            onProgress: (f) => {
+              $("busyText").textContent = `Saving undo snapshot… ${Math.round(f * 100)}%`;
+            },
+          });
+          blobUndo = {
+            kind: "pcm-blob",
+            blob,
+            length: before.length,
+            sampleRate: state.sampleRate,
+            after: null,
+          };
+        } catch (err) {
+          clearHistory();
+          const detail = err && err.message ? err.message : String(err);
+          suffix = ` (undo snapshot failed: ${detail})`;
+          blobUndo = null;
+        }
+      }
+      let result;
+      try {
+        result = await cleanUp(before, state.sampleRate, opts, (f) => {
+          $("busyText").textContent = `Denoising… ${Math.round(f * 100)}%`;
+        });
+      } catch (err) {
+        // The snapshot belongs to an edit that never happened.
+        blobUndo = null;
+        throw err;
+      }
+      const { pcm, steps, gain } = result;
       if (pcm === before) {
+        blobUndo = null;
         $("saveStatus").textContent = cleanupSummary(steps);
         return;
       }
-      let suffix = "";
       if (gain !== null) {
         // Normalize was the only stage, so the whole run is one multiplier:
         // exact and free to undo, with no second buffer.
+        blobUndo = null;
         pushHistory({ kind: "gain", gain });
-      } else if (before.length <= CLEANUP_UNDO_MAX_SAMPLES) {
+      } else if (blobUndo) {
+        blobUndo.after = pcm;
+        pushHistory(blobUndo);
+      } else if (before.length <= CLEANUP_MEMORY_UNDO_MAX_SAMPLES) {
         // Otherwise the chain cannot be inverted, so the history keeps the
-        // previous samples. When the recording is too long to hold a second
-        // copy the history is dropped instead, because its entries would no
-        // longer chain.
+        // previous samples.
         pushHistory({ kind: "pcm", before, after: pcm });
       } else {
         clearHistory();
@@ -940,10 +1021,13 @@ $("cleanRun").addEventListener("click", async () => {
       await swapSource(pcm, cleanupSummary(steps) + suffix);
       // Done: put the options away.
       showCleanOptions(false);
-    } catch (err) {
-      $("saveStatus").textContent = `Clean up failed: ${err.message}`;
-    }
-  });
+    });
+  } catch (err) {
+    const detail = err && err.message ? err.message : String(err);
+    $("saveStatus").textContent = `Clean up failed: ${detail}`;
+  } finally {
+    historyBusy = false;
+  }
 });
 
 // ── Playback ────────────────────────────────────────────────────────────────
