@@ -1,4 +1,4 @@
-﻿//! Clean-up stage tests: rumble high-pass, consonant boost, soft limiter.
+//! Clean-up stage tests: rumble high-pass, consonant boost, soft limiter.
 //!
 //! These are single-tone or two-tone probes, so a stage's effect on each band
 //! is measured directly rather than inferred from the waveform.
@@ -73,14 +73,24 @@ fn consonant_boost_raises_the_high_band() {
 
 #[test]
 fn consonant_boost_compresses_loud_highs_more_than_quiet() {
-    let loud = enhance::consonant_boost(&sine(6000.0, 2.0, SR, 0.5), SR, 2000.0, 0.0, 1.0);
-    let quiet = enhance::consonant_boost(&sine(6000.0, 2.0, SR, 0.005), SR, 2000.0, 0.0, 1.0);
+    let sr = 48000;
+    // One file, one band, two levels. The threshold is taken from the band's own
+    // upper percentile, so the loud half must be compressed more than the quiet
+    // half. The old absolute -30 dBFS threshold instead made the whole stage's
+    // net gain depend on the recording's overall level.
+    let quiet = sine(6000.0, 1.0, sr, 0.1);
+    let loud = sine(6000.0, 1.0, sr, 0.5);
+    let mut x = quiet.clone();
+    x.extend_from_slice(&loud);
 
-    let loud_gain = tone_amplitude(&loud[SKIP..], 6000.0, SR) / 0.5;
-    let quiet_gain = tone_amplitude(&quiet[SKIP..], 6000.0, SR) / 0.005;
+    let y = enhance::consonant_boost(&x, sr, 2000.0, 0.0, 1.0);
+    let n = sr as usize;
+    let quiet_gain = tone_amplitude(&y[SKIP..n], 6000.0, sr) / tone_amplitude(&x[SKIP..n], 6000.0, sr);
+    let loud_gain = tone_amplitude(&y[n + SKIP..2 * n], 6000.0, sr)
+        / tone_amplitude(&x[n + SKIP..2 * n], 6000.0, sr);
 
     assert!(
-        loud_gain < quiet_gain * 0.8,
+        loud_gain < quiet_gain * 0.85,
         "a loud high band should be compressed more: loud {loud_gain}, quiet {quiet_gain}"
     );
     assert!(
@@ -88,6 +98,21 @@ fn consonant_boost_compresses_loud_highs_more_than_quiet() {
         "a quiet high band should be left alone, got {quiet_gain}"
     );
 }
+
+#[test]
+fn consonant_boost_never_cuts_the_high_band() {
+    let sr = 48000;
+    // Whatever the input level, the stage is a boost: the compressor may reduce
+    // the shelf's gain but never past unity net. Absolute thresholds made a loud
+    // fricative come out quieter than it went in.
+    for amp in [0.02, 0.1, 0.5, 0.9] {
+        let x = sine(6000.0, 1.0, sr, amp);
+        let y = enhance::consonant_boost(&x, sr, 2000.0, 6.0, 1.0);
+        let gain = tone_amplitude(&y[SKIP..], 6000.0, sr) / amp;
+        assert!(gain > 1.0, "amp {amp}: net gain {gain} is not a boost");
+    }
+}
+
 
 #[test]
 fn soft_limiter_never_exceeds_the_ceiling() {
@@ -110,6 +135,53 @@ fn soft_limiter_leaves_quiet_material_untouched() {
     }
 }
 
+/// Total harmonic distortion of a sine probe, from its first eight harmonics.
+fn thd(x: &[f64], f: f64, sr: u32) -> f64 {
+    let fundamental = tone_amplitude(x, f, sr);
+    if fundamental <= 0.0 {
+        return 0.0;
+    }
+    let mut harmonics = 0.0f64;
+    for k in 2..=8 {
+        let a = tone_amplitude(x, f * k as f64, sr);
+        harmonics += a * a;
+    }
+    harmonics.sqrt() / fundamental
+}
+
+#[test]
+fn limiter_holds_a_steady_tone_above_the_ceiling_without_distorting_it() {
+    let sr = 48000;
+    let ceiling_db = -1.0;
+    let ceiling = 10f64.powf(ceiling_db / 20.0);
+    // 0 dBFS, a decibel over the ceiling. The lookahead gain must hold the peak;
+    // the old envelope-follower limiter measured 1.8-2.1% THD here, because the
+    // waveshaper shaped the overshoot it reacted too late to prevent.
+    let x = sine(300.0, 2.0, sr, 1.0);
+    let y = enhance::soft_limiter(&x, sr, ceiling_db);
+    let peak = y.iter().fold(0.0f64, |m, v| m.max(v.abs()));
+    assert!(peak <= ceiling + 1e-6, "peak {peak} exceeds {ceiling}");
+    let d = thd(&y[SKIP..], 300.0, sr);
+    assert!(d < 0.003, "THD {d:.5} over the ceiling");
+}
+
+#[test]
+fn limiter_leaves_material_inside_the_ceiling_undistorted() {
+    let sr = 48000;
+    // -1.4 dBFS: under the ceiling, but inside the old waveshaper's knee (0.9 x
+    // ceiling), which gave 0.15% THD here.
+    let x = sine(300.0, 1.0, sr, 10f64.powf(-1.4 / 20.0));
+    let y = enhance::soft_limiter(&x, sr, -1.0);
+    for i in 0..x.len() {
+        assert!(
+            (x[i] - y[i]).abs() < 1e-9,
+            "sample {i} changed by {}",
+            x[i] - y[i]
+        );
+    }
+}
+
+
 #[test]
 fn stages_stay_finite_and_silent_on_silence() {
     let x = vec![0.0f64; SR as usize];
@@ -124,7 +196,7 @@ fn stages_stay_finite_and_silent_on_silence() {
     }
 }
 
-// â”€â”€ Leveler (uneven speaker levels) â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+// -- Leveler (uneven speaker levels) --------------------------------------
 
 fn rms(a: &[f64]) -> f64 {
     (a.iter().map(|v| v * v).sum::<f64>() / a.len() as f64).sqrt()
@@ -164,6 +236,104 @@ fn leveler_raises_a_quiet_section_and_leaves_the_loud_ones() {
     assert!(
         gain_db <= 12.2,
         "boost must respect the cap, got {gain_db:.1} dB"
+    );
+}
+
+#[test]
+fn leveler_lifts_a_quiet_turn_evenly_from_start_to_end() {
+    let sr = 48000;
+    let n = sr as usize;
+    // Loud speaker, pause, quiet speaker 20 dB down, pause, loud again. A
+    // windowed estimate alone pulled the quiet turn's first and last half second
+    // down toward the loud speaker still inside the window, so the turn came out
+    // level in the middle and quiet at the edges.
+    let mut x = sine(150.0, 2.0, sr, 0.4);
+    x.extend(vec![0.001f64; n / 2]);
+    x.extend(sine(150.0, 2.0, sr, 0.04));
+    x.extend(vec![0.001f64; n / 2]);
+    x.extend(sine(150.0, 2.0, sr, 0.4));
+    let y = enhance::level(&x, sr, 18.0, 3.0);
+
+    let gain = |start: usize, end: usize| rms(&y[start..end]) / rms(&x[start..end]);
+    let start = 5 * n / 2; // first frame of the quiet turn
+    let mid = gain(start + n, start + 2 * n);
+    let first = gain(start, start + n / 2);
+    let last = gain(start + 2 * n - n / 2, start + 2 * n);
+
+    assert!(mid > 4.0, "the quiet turn should be lifted, got {mid:.2}");
+    for (name, edge) in [("first", first), ("last", last)] {
+        assert!(
+            edge >= mid * 0.9,
+            "the {name} half second of the turn got {edge:.2} against {mid:.2} mid-turn"
+        );
+    }
+}
+
+#[test]
+fn leveler_does_not_lift_a_transient_with_its_passage() {
+    let sr = 48000;
+    let n = sr as usize;
+    // A loud anchor, a pause, then a quiet passage that gets the full boost,
+    // with a thump inside it. At 0.9 amplitude the thump would clip if the
+    // passage's boost were applied to it.
+    let mut x = sine(150.0, 1.0, sr, 0.4);
+    x.extend(vec![0.001f64; n / 2]);
+    let mut quiet = sine(150.0, 1.0, sr, 0.04);
+    let thump_at = n / 2;
+    let thump_len = n / 20; // 50 ms
+    for i in 0..thump_len {
+        let t = i as f64 / sr as f64;
+        quiet[thump_at + i] = 0.9 * (2.0 * std::f64::consts::PI * 80.0 * t).sin();
+    }
+    x.extend_from_slice(&quiet);
+    let y = enhance::level(&x, sr, 18.0, 3.0);
+
+    let base = n + n / 2 + thump_at;
+    let peak = |a: &[f64]| a.iter().fold(0.0f64, |m, v| m.max(v.abs()));
+    // Measure the body of the thump, clear of the frames it only partly fills.
+    let lo = base + n / 200;
+    let hi = base + thump_len - n / 200;
+    let thump_gain = peak(&y[lo..hi]) / peak(&x[lo..hi]);
+    let speech_lo = n + n / 2 + n / 8;
+    let speech_hi = n + n / 2 + n / 3;
+    let speech_gain = rms(&y[speech_lo..speech_hi]) / rms(&x[speech_lo..speech_hi]);
+
+    assert!(
+        speech_gain > 3.0,
+        "the quiet passage should still be lifted, got {speech_gain:.2}"
+    );
+    assert!(
+        thump_gain < speech_gain * 0.3,
+        "the thump was lifted by {thump_gain:.2} against the passage's {speech_gain:.2}"
+    );
+    assert!(
+        peak(&y[lo..hi]) < 1.0,
+        "the thump was pushed over full scale: {}",
+        peak(&y[lo..hi])
+    );
+}
+
+#[test]
+fn leveler_converges_rather_than_stacking() {
+    let sr = 48000;
+    let x = uneven(sr);
+    let once = enhance::level(&x, sr, 18.0, 3.0);
+    let twice = enhance::level(&once, sr, 18.0, 3.0);
+    let n = sr as usize;
+    let gain_db = |a: &[f64]| 20.0 * (rms(&a[6 * n..9 * n]) / rms(&x[6 * n..9 * n])).log10();
+    let once_db = gain_db(&once);
+    let twice_db = gain_db(&twice);
+    // A 20 dB gap needs more than one pass at an 18 dB cap, so the second pass
+    // tops it up -- but it must be a remainder, not another full boost. The app
+    // renders every clean-up from the pristine source, so it never passes twice.
+    assert!(
+        once_db > 12.0,
+        "the first pass should lift the quiet part, got {once_db:.1} dB"
+    );
+    assert!(
+        twice_db - once_db < once_db * 0.25,
+        "a second pass stacked {:.1} dB on {once_db:.1} dB",
+        twice_db - once_db
     );
 }
 

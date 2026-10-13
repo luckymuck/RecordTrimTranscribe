@@ -28,7 +28,10 @@ function noise(n, amp) {
   const out = new Float32Array(n);
   let seed = 0x2545f491;
   for (let i = 0; i < n; i++) {
-    seed = (seed * 6364136223846793005 + 1442695040888963407) >>> 0;
+    // Math.imul keeps the LCG in 32-bit arithmetic. Plain float multiplication
+    // lost the low bits, so the sequence collapsed to two alternating values and
+    // the "noise" tests were measuring a square wave.
+    seed = (Math.imul(seed, 1664525) + 1013904223) >>> 0;
     out[i] = ((seed >>> 8) / 8388608 - 1) * amp;
   }
   return out;
@@ -154,6 +157,51 @@ test("isGainOnlyCleanup matches the single-multiplier undo rule", () => {
   assert.equal(isGainOnlyCleanup({ ...only, rumble: true }), false);
   // A selected consonant stage means the chain is not one multiplier, even at 0 dB.
   assert.equal(isGainOnlyCleanup({ ...only, consonant: true, consonantDb: 0 }), false);
+});
+
+test("cleanUp never mutates the caller's buffer", async () => {
+  // The caller's buffer is the pristine source every render starts from.
+  const x = tone(300, 0.3, 48000, 0.2);
+  const copy = Float32Array.from(x);
+  await cleanUp(x, 48000, {
+    rumble: true,
+    denoise: false,
+    level: true,
+    consonant: true,
+    consonantDb: 3,
+    loudness: false,
+  });
+  assert.deepEqual(x, copy, "the source buffer was modified in place");
+});
+
+test("cleanUp auto-engages the limiter when a stage raises the level", async () => {
+  const x = tone(300, 0.5, 48000, 0.2);
+  const { pcm, steps } = await cleanUp(x, 48000, {
+    rumble: false,
+    denoise: false,
+    level: true,
+    consonant: false,
+    loudness: false,
+  });
+  assert.ok(
+    steps.some((s) => s.includes("limited")),
+    `the limiter should run after a gain stage, steps: ${steps}`
+  );
+  const ceiling = 10 ** (LIMIT_CEILING_DB / 20);
+  const peak = pcm.reduce((m, v) => Math.max(m, Math.abs(v)), 0);
+  assert.ok(peak <= ceiling + 1e-6, `peak ${peak} exceeds ${ceiling}`);
+});
+
+test("cleanUp does not limit a chain that only attenuates", async () => {
+  const x = tone(300, 0.5, 48000, 0.2);
+  const { steps } = await cleanUp(x, 48000, {
+    rumble: true,
+    denoise: false,
+    level: false,
+    consonant: false,
+    loudness: false,
+  });
+  assert.ok(!steps.some((s) => s.includes("limited")), `steps: ${steps}`);
 });
 
 test("cleanupSummary describes the run", () => {

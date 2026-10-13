@@ -4,12 +4,12 @@ import init, {
   SkipBakedMap,
   StreamStretcher,
   analyze,
-  consonant_boost,
-  highpass,
+  consonant_boost_in_place,
+  highpass_in_place,
   initSync,
-  level,
+  level_in_place,
   silence_zones,
-  soft_limiter,
+  soft_limiter_in_place,
   time_stretch,
   time_stretch_skip_silence,
   version,
@@ -76,28 +76,38 @@ export function analyzeClip(pcm, sampleRate) {
   return JSON.parse(analyze(pcm, sampleRate));
 }
 
-/** Rumble/hum high-pass (S-5). */
+/**
+ * Rumble/hum high-pass (S-5), in place: `pcm` is modified and returned.
+ *
+ * The clean-up stages run one after another on the same buffer. Returning a new
+ * array per stage doubled both the WASM heap and the JS heap, which put a
+ * one-hour recording over wasm32's 4 GiB ceiling.
+ */
 export function highpassFilter(pcm, sampleRate, cutoffHz) {
-  return highpass(pcm, sampleRate, cutoffHz);
+  highpass_in_place(pcm, sampleRate, cutoffHz);
+  return pcm;
 }
 
-/** Consonant boost: high-shelf plus light high-band compression (S-4). */
+/** Consonant boost: high-shelf plus light high-band compression (S-4). In place. */
 export function consonantBoost(pcm, sampleRate, cornerHz, gainDb, amount) {
-  return consonant_boost(pcm, sampleRate, cornerHz, gainDb, amount);
+  consonant_boost_in_place(pcm, sampleRate, cornerHz, gainDb, amount);
+  return pcm;
 }
 
-/** Soft limiter to `ceilingDb` (S-13). */
+/** Lookahead peak limiter to `ceilingDb` (S-13). In place. */
 export function softLimiter(pcm, sampleRate, ceilingDb) {
-  return soft_limiter(pcm, sampleRate, ceilingDb);
+  soft_limiter_in_place(pcm, sampleRate, ceilingDb);
+  return pcm;
 }
 
 /**
  * Slow leveler: brings quiet passages up toward the loud ones, so a speaker far
  * from the microphone is heard at about the same level as one close to it.
- * `maxBoostDb` caps the lift; `windowS` is how long a "passage" is.
+ * `maxBoostDb` caps the lift; `windowS` is how long a "passage" is. In place.
  */
 export function levelVoices(pcm, sampleRate, maxBoostDb, windowS) {
-  return level(pcm, sampleRate, maxBoostDb, windowS);
+  level_in_place(pcm, sampleRate, maxBoostDb, windowS);
+  return pcm;
 }
 
 /**

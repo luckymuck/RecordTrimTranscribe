@@ -143,16 +143,22 @@ function findSilenceGaps(samples, sampleRate, minSilenceSeconds = TRANSCRIPTION_
   const energies = pcmEnergies(samples, frameSamples, hopSamples);
   if (energies.length === 0) return [];
 
-  const sorted = [...energies].sort((a, b) => a - b);
-  const peak = sorted[sorted.length - 1];
+  // The decision is made in decibels against a high percentile, matching the
+  // playback detector. Anchoring the threshold to the loudest frame (the old
+  // `floor + 8% of the peak` in linear units) let one cough or plosive push the
+  // threshold above soft speech, so a quiet speaker's window was cut as silence.
+  const db = energies.map((e) => 20 * Math.log10(Math.max(1e-9, e)));
+  const sorted = [...db].sort((a, b) => a - b);
   const floor = sorted[Math.floor(sorted.length / 10)];
-  const threshold = Math.max(1e-4, floor + 0.08 * (peak - floor));
+  const speechLevel = sorted[Math.min(sorted.length - 1, Math.floor(sorted.length * 0.9))];
+  const span = Math.max(1e-6, speechLevel - floor);
+  const threshold = floor + 0.35 * span;
   const minimumGap = Math.max(1, Math.round(minSilenceSeconds * sampleRate));
 
   const gaps = [];
   let gapStartFrame = -1;
-  for (let i = 0; i < energies.length; i += 1) {
-    if (energies[i] <= threshold) {
+  for (let i = 0; i < db.length; i += 1) {
+    if (db[i] <= threshold) {
       if (gapStartFrame < 0) gapStartFrame = i;
     } else if (gapStartFrame >= 0) {
       const start = gapStartFrame * hopSamples;

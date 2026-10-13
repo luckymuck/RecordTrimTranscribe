@@ -71,21 +71,25 @@ export function analyze(samples: Float32Array, sample_rate: number): string;
 
 /**
  * Consonant boost: a high-shelf above `corner_hz` plus light high-band
- * compression (S-4). `amount` (0..1) scales the compression.
+ * compression (S-4). `amount` (0..1) scales the compression. In place.
  */
-export function consonant_boost(samples: Float32Array, sample_rate: number, corner_hz: number, gain_db: number, amount: number): Float32Array;
+export function consonant_boost_in_place(samples: Float32Array, sample_rate: number, corner_hz: number, gain_db: number, amount: number): void;
 
 /**
  * Rumble/hum high-pass, applied to the source before stretching (S-5).
+ *
+ * In place: the clean-up stages run one after another on the same buffer, so
+ * returning a new array per stage doubled both the WASM heap and the JS heap.
+ * At 48 kHz a one-hour recording is 691 MB per `f32` copy.
  */
-export function highpass(samples: Float32Array, sample_rate: number, cutoff_hz: number): Float32Array;
+export function highpass_in_place(samples: Float32Array, sample_rate: number, cutoff_hz: number): void;
 
 /**
  * Slow leveler: brings quiet passages up toward the loud ones, capped at
  * `max_boost_db` over a `window_s` window. Used both by the clean-up chain and
- * to level the audio fed to transcription.
+ * to level the audio fed to transcription. In place.
  */
-export function level(samples: Float32Array, sample_rate: number, max_boost_db: number, window_s: number): Float32Array;
+export function level_in_place(samples: Float32Array, sample_rate: number, max_boost_db: number, window_s: number): void;
 
 /**
  * Silence runs longer than `min_silence_s`, as flat `[start, end, ...]` sample
@@ -98,9 +102,9 @@ export function level(samples: Float32Array, sample_rate: number, max_boost_db: 
 export function silence_zones(samples: Float32Array, sample_rate: number, min_silence_s: number): Float64Array;
 
 /**
- * Soft limiter to `ceiling_db` (S-13).
+ * Soft limiter to `ceiling_db` (S-13). In place.
  */
-export function soft_limiter(samples: Float32Array, sample_rate: number, ceiling_db: number): Float32Array;
+export function soft_limiter_in_place(samples: Float32Array, sample_rate: number, ceiling_db: number): void;
 
 /**
  * Install a panic hook so a panic reports its message and location in the
@@ -142,13 +146,13 @@ export interface InitOutput {
     readonly analyze: (a: number, b: number, c: number) => [number, number];
     readonly bakedmap_map_position: (a: number, b: number) => number;
     readonly bakedmap_new: (a: number, b: number, c: number, d: number, e: number) => number;
-    readonly consonant_boost: (a: number, b: number, c: number, d: number, e: number, f: number) => [number, number];
-    readonly highpass: (a: number, b: number, c: number, d: number) => [number, number];
-    readonly level: (a: number, b: number, c: number, d: number, e: number) => [number, number];
+    readonly consonant_boost_in_place: (a: number, b: number, c: any, d: number, e: number, f: number, g: number) => void;
+    readonly highpass_in_place: (a: number, b: number, c: any, d: number, e: number) => void;
+    readonly level_in_place: (a: number, b: number, c: any, d: number, e: number, f: number) => void;
     readonly silence_zones: (a: number, b: number, c: number, d: number) => [number, number];
     readonly skipbakedmap_map_position: (a: number, b: number) => number;
     readonly skipbakedmap_new: (a: number, b: number, c: number, d: number, e: number, f: number, g: number) => number;
-    readonly soft_limiter: (a: number, b: number, c: number, d: number) => [number, number];
+    readonly soft_limiter_in_place: (a: number, b: number, c: any, d: number, e: number) => void;
     readonly start: () => void;
     readonly streamstretcher_available_output: (a: number) => number;
     readonly streamstretcher_finish: (a: number) => void;

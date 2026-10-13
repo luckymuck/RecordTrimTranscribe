@@ -49,8 +49,9 @@ build the [portable desktop app](#portable) to use it with no network at all.
 - With the waveform focused: **arrows** nudge the cursor, **Home/End** jump to
   the ends, **Enter** splits at the cursor and **]** removes the nearest split.
 - **Ctrl+Z** / **Ctrl+Y** undo and redo; on macOS **Cmd+Z** and **Cmd+Shift+Z**.
-  Splits and clean-up steps are both undoable. Long destructive clean-ups save
-  an exact snapshot first, instead of refusing undo past the old in-memory size.
+  Splits and clean-up steps are both undoable. Clean-up is non-destructive: the
+  pristine source is kept, every run is rendered from it, and undo restores the
+  previous settings, so repeated runs never stack and nothing is ever lost.
 - **Clean up.** The `clean up` button opens a small options panel and a
   **Run clean-up** button; running it applies the selected stages to the
   recording before anything is stretched, because stretching exaggerates noise
@@ -60,20 +61,26 @@ build the [portable desktop app](#portable) to use it with no network at all.
   - **denoise** — [RNNoise](https://gitlab.xiph.org/xiph/rnnoise) speech
     denoising, run at 48 kHz in 10 ms frames and resampled back (on by default).
     Loaded from the vendored build under `app/vendor/rnnoise/`; there is no CDN
-    fallback, so nothing can reach out.
-  - **level voices** — brings quiet passages up toward the loud ones (up to
-    12 dB, measured over a 3 s window), so a speaker further from the microphone
-    is heard at about the same level as one close to it. It is a slow leveler,
-    not short-term compression, and it holds the gain through pauses so skip
-    silence still finds the gaps afterwards. The same leveling is applied to the
-    audio fed to transcription, automatically.
+    fallback, so nothing can reach out. The model's state is reset for every run.
+  - **level voices** — brings quiet passages up toward the loud ones, so a
+    speaker further from the microphone is heard at about the same level as one
+    close to it. Utterances are levelled one at a time: each is measured over its
+    own speech and gets one gain, with the gain ramping across the pauses, so a
+    quiet turn is lifted evenly from its first word to its last. The lift is
+    capped (18 dB, and lower when the recording's own noise floor is close to its
+    loud level) and a frame already near the loud level is not lifted with its
+    passage, so a thump or click cannot be pushed up by a boost meant for the
+    quiet speech around it.
   - **consonant boost** — a high-shelf above 2 kHz with a 0–6 dB strength control
     plus light high-band compression, so soft consonants sit closer to the vowels.
+    The compressor's threshold comes from the band's own level, so the stage is a
+    boost at every input level instead of turning into a cut on loud material.
   - **normalize** — sets the level, either to a −1 dBFS peak or to −20 dBFS RMS
-    (the mode selector beside it), and runs before the limiter so the limiter is
-    still the final guard.
-  - **limit peaks** — a −1 dBFS peak limiter, also applied to speed-baked exports
-    after the DSP so a stretched render cannot clip.
+    measured over the speech-active frames (pauses and transients excluded). The
+    RMS mode only ever raises; the limiter handles the peaks.
+  - **limit peaks** — a −1 dBFS lookahead limiter. It also runs automatically
+    whenever a stage raised the level, and on any export whose peak would run
+    over the ceiling, so cleaned audio cannot clip.
 
 ## Export
 
@@ -87,6 +94,13 @@ build the [portable desktop app](#portable) to use it with no network at all.
 Transcripts can be generated for the whole file or for a single clip, and they
 appear **as they are produced** rather than only at the end. Double-click a
 transcript line to play the audio from that point.
+
+Transcription reads the **pristine source** by default, with only a rumble
+high-pass and the leveler applied: denoising and the consonant shelf are tuned
+for listening and can remove detail the model uses, while Whisper is trained on
+noisy audio and prefers it unshaped. Tick **cleaned audio** beside the Transcribe
+button to send the cleaned render instead. A level change cannot move a
+timestamp, so the word timings stay valid either way.
 
 **Follow audio** (on by default) highlights the line being played and scrolls it
 to sit four lines from the top, so you can read along with what was just said and
@@ -206,23 +220,30 @@ signing would remove the prompt but needs a certificate.
   MFA path.
 - On the web build, Whisper weights are a one-time download rather than bundled;
   the portable desktop build includes them.
+- The pristine source is kept in memory as 16-bit PCM (half an f32 copy, about
+  173 MB for 30 minutes or 346 MB for an hour at 48 kHz). Its quantization sits
+  at about −96 dBFS, far below any recording's own noise floor, so it costs
+  nothing audible and keeps transcription unaffected. A recording's original
+  WebM chunks are left in place on disk rather than replaced by a snapshot of an
+  edit, and a loaded file's pristine copy is re-read from the file handle.
 
 ## Verifying
 
 ```powershell
 cd core
-cargo test            # 71 tests: timing, pitch, PSOLA, WSOLA, streaming, rate,
+cargo test            # 77 tests: timing, pitch, PSOLA, WSOLA, streaming, rate,
                       # step continuity, real-time throughput, skip-silence,
                       # seam envelope, class-aware length, odd sample rates,
-                      # rumble/consonant/level/normalize/limiter stages
+                      # rumble/consonant/level/normalize/limiter stages, the
+                      # leveler's turn boundaries and transient guard, limiter THD
 node dsp_smoke.mjs    # WASM bindings end-to-end (needs: npx wasm-pack build --target nodejs)
 
 cd ..
-node --test app/test/*.test.mjs   # 72 JS unit tests: transcript formatting,
+node --test app/test/*.test.mjs   # 75 JS unit tests: transcript formatting,
                                   # filenames, split boundaries, dial and zoom
-                                  # arithmetic, WAV encoding, normalization,
-                                  # the clean-up chain and RNNoise, transcript
-                                  # follow/marker helpers
+                                  # arithmetic, WAV encoding, speech-active
+                                  # normalization, the clean-up chain and RNNoise,
+                                  # transcript follow/marker helpers
 ```
 
 CI runs both suites (`.github/workflows/core-tests.yml`, `web-tests.yml`) plus a

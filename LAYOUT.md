@@ -10,8 +10,8 @@ app/                     The whole product surface (static, client-side)
   src/
     core/dsp.js          loads the WASM DSP core, exposes timeStretch/StreamStretcher
     audio/               decode, MediaRecorder capture, WAV + MP3 encoders,
-                         normalization arithmetic, RNNoise denoise, clean-up chain,
-                         exact undo snapshots
+                         normalization arithmetic (speech-active RMS), RNNoise
+                         denoise, clean-up chain
     ui/waveform.js       overview + zoomable waveform, playhead, split markers
     ui/speed.js          speed-dial arithmetic (1.00x-4.00x, no slow-down)
     ui/view.js           zoom/pan arithmetic
@@ -36,7 +36,9 @@ core/                    Rust crate `fasttalk-core` (the DSP), compiled to WASM
     engines/wsola.rs     overlap-add engine
     engines/psola.rs     TD-PSOLA engine
     engines/hybrid.rs    copy-through / PSOLA / WSOLA composition
-    enhance.rs           rumble high-pass, consonant boost, normalize, soft limiter
+    enhance.rs           in-place stages: rumble high-pass, voice leveler
+                         (per-utterance, transient guard), consonant boost,
+                         lookahead limiter
     rate.rs              energy alignment + class-aware rate allocation
     stream.rs            real-time streaming time-stretch
     api.rs               wasm-bindgen exports

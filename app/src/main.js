@@ -1,5 +1,5 @@
 // Application wiring: record/load → waveform → playback → transcribe → export.
-import { initDsp, getDspVersion, makeBakedMap, makeSkipBakedMap, timeStretchSkipSilence, silenceZones, softLimiter, levelVoices } from "./core/dsp.js";
+import { initDsp, getDspVersion, makeBakedMap, makeSkipBakedMap, timeStretchSkipSilence, silenceZones, softLimiter, levelVoices, highpassFilter } from "./core/dsp.js";
 import { decodeAudioBlob, audioContext } from "./audio/decode.js";
 import { Recorder } from "./audio/record.js";
 import { encode, encodeAsync, encodeWav } from "./audio/encode.js";
@@ -21,9 +21,8 @@ import {
 } from "./util/filenames.js";
 import { CLICK_PX, SPEED_MAX, SPEED_MIN, clampSpeed, speedAfterDrag, speedFromDrag, stepSpeed } from "./ui/speed.js";
 import { zoomAnchor, zoomAround } from "./ui/view.js";
-import { applyGain } from "./audio/normalize.js";
-import { restorePcmSnapshot, snapshotPcm } from "./audio/undo.js";
-import { cleanUp, cleanupActive, cleanupOptions, cleanupSummary, isGainOnlyCleanup, LEVEL_MAX_BOOST_DB, LEVEL_WINDOW_S } from "./audio/enhance.js";
+import { peakOf } from "./audio/normalize.js";
+import { cleanUp, cleanupActive, cleanupOptions, cleanupSummary, LIMIT_CEILING_DB, RUMBLE_CUTOFF_HZ, LEVEL_MAX_BOOST_DB, LEVEL_WINDOW_S } from "./audio/enhance.js";
 
 const $ = (id) => document.getElementById(id);
 
@@ -45,7 +44,35 @@ const state = {
   // IndexedDB session this source autosaves into. A fresh id per source means a
   // new recording never overwrites an unrecovered one.
   sessionId: null,
+  // The pristine source, as Int16: every clean-up renders from this, so runs
+  // never stack, undo is a re-render, and transcription can use the original
+  // rather than the cleaned audio. Int16 is half an f32 copy and its -96 dBFS
+  // quantization sits far below any recording's own noise floor.
+  original: null,
+  // The clean-up options currently applied to the working copy, or null.
+  cleanupOptions: null,
+  // A recording's pristine audio is already persisted chunk by chunk, so its
+  // autosave must not replace those chunks with a snapshot of an edit.
+  keepChunks: false,
 };
+
+/** A pristine Int16 copy of `pcm`. */
+function toInt16(pcm) {
+  const out = new Int16Array(pcm.length);
+  for (let i = 0; i < pcm.length; i++) {
+    const v = Math.round(pcm[i] * 32767);
+    out[i] = v > 32767 ? 32767 : v < -32768 ? -32768 : v;
+  }
+  return out;
+}
+
+/** A fresh f32 copy of the pristine source. */
+function pristinePcm() {
+  if (!state.original) return null;
+  const out = new Float32Array(state.original.length);
+  for (let i = 0; i < out.length; i++) out[i] = state.original[i] / 32767;
+  return out;
+}
 
 // The last committed split list, so a split edit can be recorded in the history
 // as one undoable step (and a drag, which fires many times, as a single one).
@@ -314,22 +341,40 @@ function markUnsaved() {
   $("saveStatus").textContent = "unsaved ⚠";
 }
 
-/** Snapshot the current clip into IndexedDB so it survives a page close. */
+/**
+ * Persist the source into IndexedDB so it survives a page close.
+ *
+ * A recording's pristine audio is already stored chunk by chunk as it arrives,
+ * so only its metadata is updated: replacing those chunks with a WAV snapshot of
+ * a cleaned edit used to destroy the original capture. Anything else stores the
+ * pristine source, not the render, so a recovery can reproduce any clean-up.
+ */
+let autosaveSnapshotDone = false;
+
 async function persistAutosave() {
   if (!state.pcm || !storageAvailable()) return;
   if (!state.sessionId) state.sessionId = newSessionId();
   try {
-    const blob = encodeWav(state.pcm, state.sampleRate);
+    const meta = {
+      name: state.sourceName || "recording",
+      sampleRate: state.sampleRate,
+      cleanup: state.cleanupOptions || null,
+    };
+    if (state.keepChunks) {
+      await createSession(state.sessionId, { ...meta, type: "audio/webm", live: true });
+      return;
+    }
+    if (autosaveSnapshotDone) {
+      // The pristine source has not changed, so only the metadata (the clean-up
+      // options) needs writing. Re-encoding the WAV on every edit cost 346 MB of
+      // work per swap on a one-hour recording.
+      await createSession(state.sessionId, { ...meta, type: "audio/wav" });
+      return;
+    }
+    const blob = encodeWav(pristinePcm() || state.pcm, state.sampleRate);
     const buffer = await blob.arrayBuffer();
-    await replaceSnapshot(
-      state.sessionId,
-      {
-        name: state.sourceName || "recording",
-        sampleRate: state.sampleRate,
-        type: "audio/wav",
-      },
-      buffer
-    );
+    await replaceSnapshot(state.sessionId, { ...meta, type: "audio/wav" }, buffer);
+    autosaveSnapshotDone = true;
   } catch (e) {
     // Storage unavailable or full: say so rather than claiming protection.
     $("saveStatus").textContent = "unsaved ⚠ (autosave failed)";
@@ -356,7 +401,7 @@ function enableCards(enabled) {
   }
 }
 
-function setSource(pcm, sampleRate, label, { autosave = true, saved = false, sessionId = null } = {}) {
+function setSource(pcm, sampleRate, label, { autosave = true, saved = false, sessionId = null, keepChunks = false } = {}) {
   state.pcm = pcm;
   state.sampleRate = sampleRate;
   state.transcript = null;
@@ -364,6 +409,12 @@ function setSource(pcm, sampleRate, label, { autosave = true, saved = false, ses
   lastSplits = [];
   state.sourceName = label || "recording";
   state.sessionId = sessionId || newSessionId();
+  // The pristine copy every clean-up renders from, and the options applied to
+  // the working copy (none, for a fresh source).
+  state.original = toInt16(pcm);
+  state.cleanupOptions = null;
+  state.keepChunks = keepChunks;
+  autosaveSnapshotDone = false;
   // A new source invalidates the edit history.
   clearHistory();
   // Play should start at the beginning of the new source, not wherever the
@@ -644,10 +695,12 @@ $("stopRecBtn").addEventListener("click", async () => {
   }
   setRecordingUi(false);
   if (decoded) {
-    // The live chunks are already the recovery copy; no snapshot needed.
+    // The live chunks are already the recovery copy; no snapshot needed, and
+    // they must not be replaced by one: they are the pristine capture.
     setSource(decoded.pcm, decoded.sampleRate, recordingName(recStartDate), {
       autosave: false,
       sessionId,
+      keepChunks: true,
     });
   }
 });
@@ -764,13 +817,11 @@ $("clearSplits").addEventListener("click", () => waveform.clearSplits());
 }
 
 // ── Normalize and clean up ──────────────────────────────────────────────────
-// Edits go into a history so Ctrl+Z / Ctrl+Y can walk back and forward. A
-// normalize step is stored as its gain -- exact and free, since applying
-// 1/gain in float32 restores the samples. A short clean-up step stores the
-// A long clean-up stores those samples as an exact Blob snapshot instead of
-// keeping a second full buffer in memory. The snapshot lives only as long as
-// its history entry, so there is nothing separate to clean up.
-const CLEANUP_MEMORY_UNDO_MAX_SAMPLES = 8 * 1024 * 1024; // ~3 min at 48 kHz (32 MB)
+// Edits go into a history so Ctrl+Z / Ctrl+Y can walk back and forward. Splits
+// store their lists; a clean-up stores the options that produced it, because
+// every run is rendered from the pristine source. That is what stops repeated
+// clean-ups from stacking, and it makes undo cheap for the common case: undoing
+// the only clean-up restores the pristine copy rather than re-rendering.
 const HISTORY_MAX = 20;
 const history = { undo: [], redo: [] };
 let historyBusy = false;
@@ -795,6 +846,35 @@ function applySplits(splits, message) {
   $("saveStatus").textContent = message;
 }
 
+/**
+ * Render the pristine source through the clean-up chain, or hand back a fresh
+ * copy of it when `options` is null (no clean-up).
+ */
+async function renderCleanup(options) {
+  const source = pristinePcm();
+  if (!source) return null;
+  if (!options) return { pcm: source, steps: [] };
+  // `source` was allocated for this render, so the chain can work on it directly.
+  const { pcm, steps } = await cleanUp(
+    source,
+    state.sampleRate,
+    options,
+    (f) => {
+      $("busyText").textContent = `Denoising… ${Math.round(f * 100)}%`;
+    },
+    { copy: false }
+  );
+  return { pcm, steps };
+}
+
+/** Apply a clean-up option set (or none) to the working copy. */
+async function applyCleanup(options, message) {
+  const rendered = await renderCleanup(options);
+  if (!rendered) return;
+  state.cleanupOptions = options;
+  await swapSource(rendered.pcm, message);
+}
+
 /** Step back one edit. Entries leave the stack only after a successful undo. */
 async function undoEdit() {
   if (historyBusy) return false;
@@ -802,18 +882,10 @@ async function undoEdit() {
   if (!entry) return false;
   historyBusy = true;
   try {
-    if (entry.kind === "gain") {
-      await swapSource(applyGain(state.pcm, 1 / entry.gain), "Normalize undone");
-    } else if (entry.kind === "splits") {
+    if (entry.kind === "splits") {
       applySplits(entry.before, "Split edit undone");
-    } else if (entry.kind === "pcm") {
-      await swapSource(entry.before, "Clean up undone");
-    } else if (entry.kind === "pcm-blob") {
-      const pcm = await withBusy("Undoing clean up…", () => restorePcmSnapshot(entry.blob, entry.length));
-      if (entry.sampleRate !== state.sampleRate || pcm.length !== entry.length) {
-        throw new Error("the saved pre-clean-up audio no longer matches this recording");
-      }
-      await swapSource(pcm, "Clean up undone");
+    } else if (entry.kind === "cleanup") {
+      await withBusy("Undoing clean up…", () => applyCleanup(entry.before, "Clean up undone"));
     } else {
       throw new Error(`unknown history entry: ${entry.kind}`);
     }
@@ -836,17 +908,10 @@ async function redoEdit() {
   if (!entry) return false;
   historyBusy = true;
   try {
-    if (entry.kind === "gain") {
-      await swapSource(applyGain(state.pcm, entry.gain), "Normalize redone");
-    } else if (entry.kind === "splits") {
+    if (entry.kind === "splits") {
       applySplits(entry.after, "Split edit redone");
-    } else if (entry.kind === "pcm") {
-      await swapSource(entry.after, "Clean up redone");
-    } else if (entry.kind === "pcm-blob") {
-      if (!(entry.after instanceof Float32Array) || entry.after.length !== entry.length) {
-        throw new Error("the saved post-clean-up audio is missing");
-      }
-      await swapSource(entry.after, "Clean up redone");
+    } else if (entry.kind === "cleanup") {
+      await withBusy("Redoing clean up…", () => applyCleanup(entry.after, "Clean up redone"));
     } else {
       throw new Error(`unknown history entry: ${entry.kind}`);
     }
@@ -959,66 +1024,13 @@ $("cleanRun").addEventListener("click", async () => {
   historyBusy = true;
   try {
     await withBusy("Cleaning up…", async () => {
-      const before = state.pcm;
-      let blobUndo = null;
-      let suffix = "";
-      // A long destructive chain cannot keep a second full buffer in memory, so
-      // copy its exact before-state into a Blob snapshot first. Gain-only
-      // normalize is still inverted arithmetically and needs no snapshot.
-      if (before.length > CLEANUP_MEMORY_UNDO_MAX_SAMPLES && !isGainOnlyCleanup(opts)) {
-        try {
-          const blob = await snapshotPcm(before, {
-            onProgress: (f) => {
-              $("busyText").textContent = `Saving undo snapshot… ${Math.round(f * 100)}%`;
-            },
-          });
-          blobUndo = {
-            kind: "pcm-blob",
-            blob,
-            length: before.length,
-            sampleRate: state.sampleRate,
-            after: null,
-          };
-        } catch (err) {
-          clearHistory();
-          const detail = err && err.message ? err.message : String(err);
-          suffix = ` (undo snapshot failed: ${detail})`;
-          blobUndo = null;
-        }
-      }
-      let result;
-      try {
-        result = await cleanUp(before, state.sampleRate, opts, (f) => {
-          $("busyText").textContent = `Denoising… ${Math.round(f * 100)}%`;
-        });
-      } catch (err) {
-        // The snapshot belongs to an edit that never happened.
-        blobUndo = null;
-        throw err;
-      }
-      const { pcm, steps, gain } = result;
-      if (pcm === before) {
-        blobUndo = null;
-        $("saveStatus").textContent = cleanupSummary(steps);
-        return;
-      }
-      if (gain !== null) {
-        // Normalize was the only stage, so the whole run is one multiplier:
-        // exact and free to undo, with no second buffer.
-        blobUndo = null;
-        pushHistory({ kind: "gain", gain });
-      } else if (blobUndo) {
-        blobUndo.after = pcm;
-        pushHistory(blobUndo);
-      } else if (before.length <= CLEANUP_MEMORY_UNDO_MAX_SAMPLES) {
-        // Otherwise the chain cannot be inverted, so the history keeps the
-        // previous samples.
-        pushHistory({ kind: "pcm", before, after: pcm });
-      } else {
-        clearHistory();
-        suffix = " (too long to undo)";
-      }
-      await swapSource(pcm, cleanupSummary(steps) + suffix);
+      // Always rendered from the pristine source, so running clean-up again
+      // replaces the previous result instead of stacking on top of it.
+      const rendered = await renderCleanup(opts);
+      if (!rendered) return;
+      pushHistory({ kind: "cleanup", before: state.cleanupOptions, after: opts });
+      state.cleanupOptions = opts;
+      await swapSource(rendered.pcm, cleanupSummary(rendered.steps));
       // Done: put the options away.
       showCleanOptions(false);
     });
@@ -1258,11 +1270,8 @@ $("transcribeBtn").addEventListener("click", async () => {
   txFrac(0);
   resetTranscriptView();
   try {
-    // A speaker further from the microphone transcribes poorly. Level a copy of
-    // the audio before it goes to the model; a gain does not shift time, so the
-    // word timestamps stay valid.
-    $("txStatus").textContent = "Leveling voices…";
-    const input = levelVoices(scope.pcm, state.sampleRate, LEVEL_MAX_BOOST_DB, LEVEL_WINDOW_S);
+    $("txStatus").textContent = "Preparing audio…";
+    const input = transcriptionInput(scope);
     const raw = await transcribe(input, state.sampleRate, $("modelSel").value, {
       language: $("langSel").value || undefined,
       onStatus: (s) => {
@@ -1353,7 +1362,32 @@ function transcriptionScope() {
     noun: "clip",
     offsetSeconds: clip.start / state.sampleRate,
     pcm: state.pcm.subarray(clip.start, clip.end),
+    startSample: clip.start,
   };
+}
+
+/**
+ * The audio handed to Whisper.
+ *
+ * The pristine source by default: denoising and the consonant shelf are tuned
+ * for listening, and can remove detail the model uses, while Whisper is trained
+ * on noisy audio and prefers it unshaped. A rumble high-pass and the leveler
+ * stay, because a consistent level genuinely helps the model and a gain cannot
+ * move a timestamp. The cleaned render is available behind the checkbox.
+ */
+function transcriptionInput(scope) {
+  const out = new Float32Array(scope.pcm.length);
+  const useCleaned = $("txCleaned").checked && state.cleanupOptions;
+  if (!state.original || useCleaned) {
+    out.set(scope.pcm);
+  } else {
+    const start = scope.startSample || 0;
+    for (let i = 0; i < out.length; i++) out[i] = state.original[start + i] / 32767;
+  }
+  // In place: the stages mutate this buffer only.
+  highpassFilter(out, state.sampleRate, RUMBLE_CUTOFF_HZ);
+  levelVoices(out, state.sampleRate, LEVEL_MAX_BOOST_DB, LEVEL_WINDOW_S);
+  return out;
 }
 // ── Transcript view ─────────────────────────────────────────────────────────
 // Follow-along state: the rendered lines, their start times for the lookup, the
@@ -1694,9 +1728,17 @@ function exportSource() {
     };
   }
   // S-13: a stretched render can overshoot, so limit it before the encoder,
-  // where a clamp would otherwise distort the peaks.
+  // where a clamp would otherwise distort the peaks. A plain export is limited
+  // too, but only when it actually runs over the ceiling -- the clean-up chain
+  // already limits what it raised, and re-limiting would touch the source.
+  const ceiling = Math.pow(10, LIMIT_CEILING_DB / 20);
   if (useBakedExport() || useSkipExport()) {
-    src = { pcm: softLimiter(src.pcm, src.sampleRate, -1), sampleRate: src.sampleRate };
+    src = { pcm: softLimiter(src.pcm, src.sampleRate, LIMIT_CEILING_DB), sampleRate: src.sampleRate };
+  } else if (peakOf(src.pcm) > ceiling) {
+    src = {
+      pcm: softLimiter(Float32Array.from(src.pcm), src.sampleRate, LIMIT_CEILING_DB),
+      sampleRate: src.sampleRate,
+    };
   }
   renderCache = { key, src };
   return src;
@@ -1854,7 +1896,17 @@ window.addEventListener("beforeunload", (e) => {
               setSource(d.pcm, d.sampleRate, loaded.meta.name || "Recovered recording", {
                 autosave: false,
                 sessionId: loaded.meta.id,
+                keepChunks: loaded.meta.type === "audio/webm",
               });
+              // The stored audio is the pristine source, so a clean-up that was
+              // applied when it was saved is reproduced rather than stored.
+              if (loaded.meta.cleanup) {
+                const rendered = await renderCleanup(loaded.meta.cleanup);
+                if (rendered) {
+                  state.cleanupOptions = loaded.meta.cleanup;
+                  await swapSource(rendered.pcm, "Recovered with clean up");
+                }
+              }
             });
           } catch (err) {
             alert("Could not recover the previous session: " + err.message);

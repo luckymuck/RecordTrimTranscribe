@@ -116,7 +116,7 @@
         </select>
       </label>
       <label class="chk" title="Render exports through the DSP at the current playback speed"><input type="checkbox" id="speedBaked"> speed-baked</label>
-      <label class="chk" title="Protect consonant-like material when baking audio at speed"><input type="checkbox" id="classAware"> class-aware</label>
+      <label class="chk" title="Bake pauses at a different rate from speech: pauses are sped through, speech is protected. It does not detect individual consonants."><input type="checkbox" id="classAware"> class-aware</label>
       <button class="btn" id="exportAll">Export whole file</button>
       <button class="btn" id="exportClips">Export clips (from splits)</button>
       <span class="muted" id="exportStatus"></span>
@@ -159,6 +159,7 @@
       </label>
       <button class="btn sm toggle" id="followTx" aria-pressed="true"
         title="Highlight the line being played and keep it four lines from the top, so you can read along">follow audio</button>
+      <label class="chk" title="Transcribe the cleaned audio instead of the original. Denoising and the consonant shelf are tuned for listening and can remove detail the model uses, so the original is the default."><input type="checkbox" id="txCleaned"> cleaned audio</label>
       <span class="muted" id="txStatus"></span>
     </div>
     <div class="progress"><div id="txProgress"></div></div>

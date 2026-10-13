@@ -19,10 +19,6 @@ fn to_f64(samples: &[f32]) -> Vec<f64> {
     samples.iter().map(|v| *v as f64).collect()
 }
 
-fn to_f32(samples: Vec<f64>) -> Vec<f32> {
-    samples.into_iter().map(|v| v as f32).collect()
-}
-
 /// Ratio (`out/in`) for a requested speed-up (`speed >= 1` means faster).
 fn ratio_for_speed(speed: f64) -> f64 {
     (1.0 / speed.max(1e-3)).clamp(1e-3, 1.0)
@@ -302,47 +298,40 @@ pub fn silence_zones(samples: &[f32], sample_rate: u32, min_silence_s: f64) -> V
 }
 
 /// Rumble/hum high-pass, applied to the source before stretching (S-5).
+///
+/// In place: the clean-up stages run one after another on the same buffer, so
+/// returning a new array per stage doubled both the WASM heap and the JS heap.
+/// At 48 kHz a one-hour recording is 691 MB per `f32` copy.
 #[wasm_bindgen]
-pub fn highpass(samples: &[f32], sample_rate: u32, cutoff_hz: f64) -> Vec<f32> {
-    to_f32(enhance::highpass(&to_f64(samples), sample_rate, cutoff_hz))
+pub fn highpass_in_place(samples: &mut [f32], sample_rate: u32, cutoff_hz: f64) {
+    enhance::highpass_in_place(samples, sample_rate, cutoff_hz);
 }
 
 /// Consonant boost: a high-shelf above `corner_hz` plus light high-band
-/// compression (S-4). `amount` (0..1) scales the compression.
+/// compression (S-4). `amount` (0..1) scales the compression. In place.
 #[wasm_bindgen]
-pub fn consonant_boost(
-    samples: &[f32],
+pub fn consonant_boost_in_place(
+    samples: &mut [f32],
     sample_rate: u32,
     corner_hz: f64,
     gain_db: f64,
     amount: f64,
-) -> Vec<f32> {
-    to_f32(enhance::consonant_boost(
-        &to_f64(samples),
-        sample_rate,
-        corner_hz,
-        gain_db,
-        amount,
-    ))
+) {
+    enhance::consonant_boost_in_place(samples, sample_rate, corner_hz, gain_db, amount);
 }
 
-/// Soft limiter to `ceiling_db` (S-13).
+/// Soft limiter to `ceiling_db` (S-13). In place.
 #[wasm_bindgen]
-pub fn soft_limiter(samples: &[f32], sample_rate: u32, ceiling_db: f64) -> Vec<f32> {
-    to_f32(enhance::soft_limiter(&to_f64(samples), sample_rate, ceiling_db))
+pub fn soft_limiter_in_place(samples: &mut [f32], sample_rate: u32, ceiling_db: f64) {
+    enhance::soft_limiter_in_place(samples, sample_rate, ceiling_db);
 }
 
 /// Slow leveler: brings quiet passages up toward the loud ones, capped at
 /// `max_boost_db` over a `window_s` window. Used both by the clean-up chain and
-/// to level the audio fed to transcription.
+/// to level the audio fed to transcription. In place.
 #[wasm_bindgen]
-pub fn level(samples: &[f32], sample_rate: u32, max_boost_db: f64, window_s: f64) -> Vec<f32> {
-    to_f32(enhance::level(
-        &to_f64(samples),
-        sample_rate,
-        max_boost_db,
-        window_s,
-    ))
+pub fn level_in_place(samples: &mut [f32], sample_rate: u32, max_boost_db: f64, window_s: f64) {
+    enhance::level_in_place(samples, sample_rate, max_boost_db, window_s);
 }
 
 /// Offline render with silence longer than `min_silence_s` cut down to a `keep_s`

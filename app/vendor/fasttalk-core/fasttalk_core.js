@@ -196,56 +196,48 @@ export function analyze(samples, sample_rate) {
 
 /**
  * Consonant boost: a high-shelf above `corner_hz` plus light high-band
- * compression (S-4). `amount` (0..1) scales the compression.
+ * compression (S-4). `amount` (0..1) scales the compression. In place.
  * @param {Float32Array} samples
  * @param {number} sample_rate
  * @param {number} corner_hz
  * @param {number} gain_db
  * @param {number} amount
- * @returns {Float32Array}
  */
-export function consonant_boost(samples, sample_rate, corner_hz, gain_db, amount) {
-    const ptr0 = passArrayF32ToWasm0(samples, wasm.__wbindgen_malloc);
-    const len0 = WASM_VECTOR_LEN;
-    const ret = wasm.consonant_boost(ptr0, len0, sample_rate, corner_hz, gain_db, amount);
-    var v2 = getArrayF32FromWasm0(ret[0], ret[1]).slice();
-    wasm.__wbindgen_free(ret[0], ret[1] * 4, 4);
-    return v2;
+export function consonant_boost_in_place(samples, sample_rate, corner_hz, gain_db, amount) {
+    var ptr0 = passArrayF32ToWasm0(samples, wasm.__wbindgen_malloc);
+    var len0 = WASM_VECTOR_LEN;
+    wasm.consonant_boost_in_place(ptr0, len0, samples, sample_rate, corner_hz, gain_db, amount);
 }
 
 /**
  * Rumble/hum high-pass, applied to the source before stretching (S-5).
+ *
+ * In place: the clean-up stages run one after another on the same buffer, so
+ * returning a new array per stage doubled both the WASM heap and the JS heap.
+ * At 48 kHz a one-hour recording is 691 MB per `f32` copy.
  * @param {Float32Array} samples
  * @param {number} sample_rate
  * @param {number} cutoff_hz
- * @returns {Float32Array}
  */
-export function highpass(samples, sample_rate, cutoff_hz) {
-    const ptr0 = passArrayF32ToWasm0(samples, wasm.__wbindgen_malloc);
-    const len0 = WASM_VECTOR_LEN;
-    const ret = wasm.highpass(ptr0, len0, sample_rate, cutoff_hz);
-    var v2 = getArrayF32FromWasm0(ret[0], ret[1]).slice();
-    wasm.__wbindgen_free(ret[0], ret[1] * 4, 4);
-    return v2;
+export function highpass_in_place(samples, sample_rate, cutoff_hz) {
+    var ptr0 = passArrayF32ToWasm0(samples, wasm.__wbindgen_malloc);
+    var len0 = WASM_VECTOR_LEN;
+    wasm.highpass_in_place(ptr0, len0, samples, sample_rate, cutoff_hz);
 }
 
 /**
  * Slow leveler: brings quiet passages up toward the loud ones, capped at
  * `max_boost_db` over a `window_s` window. Used both by the clean-up chain and
- * to level the audio fed to transcription.
+ * to level the audio fed to transcription. In place.
  * @param {Float32Array} samples
  * @param {number} sample_rate
  * @param {number} max_boost_db
  * @param {number} window_s
- * @returns {Float32Array}
  */
-export function level(samples, sample_rate, max_boost_db, window_s) {
-    const ptr0 = passArrayF32ToWasm0(samples, wasm.__wbindgen_malloc);
-    const len0 = WASM_VECTOR_LEN;
-    const ret = wasm.level(ptr0, len0, sample_rate, max_boost_db, window_s);
-    var v2 = getArrayF32FromWasm0(ret[0], ret[1]).slice();
-    wasm.__wbindgen_free(ret[0], ret[1] * 4, 4);
-    return v2;
+export function level_in_place(samples, sample_rate, max_boost_db, window_s) {
+    var ptr0 = passArrayF32ToWasm0(samples, wasm.__wbindgen_malloc);
+    var len0 = WASM_VECTOR_LEN;
+    wasm.level_in_place(ptr0, len0, samples, sample_rate, max_boost_db, window_s);
 }
 
 /**
@@ -270,19 +262,15 @@ export function silence_zones(samples, sample_rate, min_silence_s) {
 }
 
 /**
- * Soft limiter to `ceiling_db` (S-13).
+ * Soft limiter to `ceiling_db` (S-13). In place.
  * @param {Float32Array} samples
  * @param {number} sample_rate
  * @param {number} ceiling_db
- * @returns {Float32Array}
  */
-export function soft_limiter(samples, sample_rate, ceiling_db) {
-    const ptr0 = passArrayF32ToWasm0(samples, wasm.__wbindgen_malloc);
-    const len0 = WASM_VECTOR_LEN;
-    const ret = wasm.soft_limiter(ptr0, len0, sample_rate, ceiling_db);
-    var v2 = getArrayF32FromWasm0(ret[0], ret[1]).slice();
-    wasm.__wbindgen_free(ret[0], ret[1] * 4, 4);
-    return v2;
+export function soft_limiter_in_place(samples, sample_rate, ceiling_db) {
+    var ptr0 = passArrayF32ToWasm0(samples, wasm.__wbindgen_malloc);
+    var len0 = WASM_VECTOR_LEN;
+    wasm.soft_limiter_in_place(ptr0, len0, samples, sample_rate, ceiling_db);
 }
 
 /**
@@ -357,6 +345,9 @@ export function version() {
 function __wbg_get_imports() {
     const import0 = {
         __proto__: null,
+        __wbg___wbindgen_copy_to_typed_array_88899a52af046901: function(arg0, arg1, arg2) {
+            new Uint8Array(arg2.buffer, arg2.byteOffset, arg2.byteLength).set(getArrayU8FromWasm0(arg0, arg1));
+        },
         __wbg___wbindgen_throw_41e9ee4f547fc59a: function(arg0, arg1) {
             throw new Error(getStringFromWasm0(arg0, arg1));
         },
@@ -416,6 +407,11 @@ function getArrayF32FromWasm0(ptr, len) {
 function getArrayF64FromWasm0(ptr, len) {
     ptr = ptr >>> 0;
     return getFloat64ArrayMemory0().subarray(ptr / 8, ptr / 8 + len);
+}
+
+function getArrayU8FromWasm0(ptr, len) {
+    ptr = ptr >>> 0;
+    return getUint8ArrayMemory0().subarray(ptr / 1, ptr / 1 + len);
 }
 
 let cachedDataViewMemory0 = null;
