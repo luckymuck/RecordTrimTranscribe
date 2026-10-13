@@ -210,7 +210,7 @@ signing would remove the prompt but needs a certificate.
 
 ```powershell
 cd core
-cargo test            # 70 tests: timing, pitch, PSOLA, WSOLA, streaming, rate,
+cargo test            # 71 tests: timing, pitch, PSOLA, WSOLA, streaming, rate,
                       # step continuity, real-time throughput, skip-silence,
                       # seam envelope, class-aware length, odd sample rates,
                       # rumble/consonant/level/normalize/limiter stages

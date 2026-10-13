@@ -161,6 +161,30 @@ fn moving_average(v: &[f64], width: usize) -> Vec<f64> {
     out
 }
 
+/// Moving percentile over `width` frames, with the window truncated at the edges.
+fn moving_percentile(v: &[f64], width: usize, percentile: usize) -> Vec<f64> {
+    let n = v.len();
+    if n == 0 {
+        return Vec::new();
+    }
+    let percentile = percentile.min(100);
+    let half = (width.max(1) / 2) as isize;
+    let mut out = Vec::with_capacity(n);
+    let mut window = Vec::with_capacity(width.max(1));
+    for i in 0..n {
+        let lo = (i as isize - half).max(0) as usize;
+        let hi = ((i as isize + half + 1) as usize).min(n);
+        window.clear();
+        window.extend_from_slice(&v[lo..hi]);
+        let k = (window.len() - 1) * percentile / 100;
+        let (_, value, _) = window.select_nth_unstable_by(k, |a, b| {
+            a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal)
+        });
+        out.push(*value);
+    }
+    out
+}
+
 /// Bring quiet passages up toward the level of the loud ones.
 ///
 /// This is a seconds-long leveler, not short-term compression: the problem it
@@ -169,6 +193,13 @@ fn moving_average(v: &[f64], width: usize) -> Vec<f64> {
 /// `max_boost_db`, and it is *held* below a gate so pauses are not lifted --
 /// which is what keeps silence detection working on the result. The gain curve
 /// is then smoothed so there is no step at a section boundary.
+///
+/// The local level is the moving upper quartile of frame levels, not their
+/// mean. A mean lets pauses in the window pull the estimate down, so speech
+/// beside a pause looked quiet and wrongly received a boost. The upper
+/// quartile stays with the speech while speech supplies more than a quarter of
+/// the window; a frame whose own level or local context is down at the gate is
+/// treated as a pause and keeps the surrounding gain.
 pub fn level(x: &[f64], sr: u32, max_boost_db: f64, window_s: f64) -> Vec<f64> {
     let levels = frame_levels_db(x, sr);
     if levels.is_empty() {
@@ -176,23 +207,26 @@ pub fn level(x: &[f64], sr: u32, max_boost_db: f64, window_s: f64) -> Vec<f64> {
     }
     let hop = ((0.010 * sr as f64) as usize).max(1);
     let width = ((window_s * sr as f64 / hop as f64).round() as usize).max(1);
-    let smoothed = moving_average(&levels, width);
+    let speech_db = moving_percentile(&levels, width, 75);
 
-    // The loud level is a high percentile of the smoothed envelope, so a single
+    // The loud level is a high percentile of the speech-level curve, so a single
     // spike cannot set the target -- the same reasoning as the silence detector.
-    let mut sorted = smoothed.clone();
+    let mut sorted = speech_db.clone();
     sorted.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
     let loud_db = sorted[(sorted.len() * 90) / 100];
     let gate_db = loud_db - 40.0;
 
-    let mut gains = vec![1.0f64; smoothed.len()];
+    let mut gains = vec![1.0f64; speech_db.len()];
     let mut held = 1.0f64;
-    for (i, db) in smoothed.iter().enumerate() {
-        if *db <= gate_db {
-            // A pause keeps whatever gain its surroundings had.
+    for i in 0..speech_db.len() {
+        let db = levels[i];
+        let local_db = speech_db[i];
+        if db <= gate_db || local_db <= gate_db {
+            // A pause, or speech with too little speech context to measure,
+            // keeps whatever gain its surroundings had.
             gains[i] = held;
         } else {
-            let boost = (loud_db - db).clamp(0.0, max_boost_db);
+            let boost = (loud_db - local_db).clamp(0.0, max_boost_db);
             gains[i] = 10f64.powf(boost / 20.0);
             held = gains[i];
         }

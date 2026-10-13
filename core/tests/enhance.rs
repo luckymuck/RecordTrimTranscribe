@@ -168,6 +168,36 @@ fn leveler_raises_a_quiet_section_and_leaves_the_loud_ones() {
 }
 
 #[test]
+fn leveler_leaves_even_speech_alone_next_to_pauses() {
+    let sr = 48000;
+    let n = sr as usize;
+    // One evenly recorded speaker with pauses between sentences. The failure was
+    // that silence pulled the smoothed local level down, so speech next to a
+    // pause was lifted while mid-passage speech was not.
+    let mut x = sine(150.0, 2.0, sr, 0.3);
+    x.extend(vec![0.001f64; n / 2]); // -60 dBFS room tone, not digital zero
+    x.extend(sine(150.0, 2.0, sr, 0.3));
+    let y = enhance::level(&x, sr, 12.0, 3.0);
+    assert_eq!(y.len(), x.len());
+
+    let gain = |start: usize, end: usize| rms(&y[start..end]) / rms(&x[start..end]);
+    let middle = gain((1.0 * n as f64) as usize, (1.8 * n as f64) as usize);
+    let before_pause = gain((1.9 * n as f64) as usize, (2.0 * n as f64) as usize);
+    let after_pause = gain((25 * n / 10) as usize, (26 * n / 10) as usize);
+
+    assert!(
+        (middle - 1.0).abs() < 0.06,
+        "even speech should keep its level, got a gain of {middle:.3}"
+    );
+    for (name, edge) in [("before", before_pause), ("after", after_pause)] {
+        assert!(
+            (edge / middle - 1.0).abs() < 0.12,
+            "speech {name} a pause changed by {edge:.3} against {middle:.3} mid-passage"
+        );
+    }
+}
+
+#[test]
 fn leveler_leaves_pauses_relative_to_their_surroundings() {
     let sr = 48000;
     // Speech, then a room-tone pause, then speech again.
