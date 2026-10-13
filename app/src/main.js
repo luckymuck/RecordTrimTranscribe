@@ -1,5 +1,5 @@
 // Application wiring: record/load → waveform → playback → transcribe → export.
-import { initDsp, getDspVersion, makeBakedMap, makeSkipBakedMap, timeStretchSkipSilence, silenceZones, softLimiter } from "./core/dsp.js";
+import { initDsp, getDspVersion, makeBakedMap, makeSkipBakedMap, timeStretchSkipSilence, silenceZones, softLimiter, levelVoices } from "./core/dsp.js";
 import { decodeAudioBlob, audioContext } from "./audio/decode.js";
 import { Recorder } from "./audio/record.js";
 import { encode, encodeAsync, encodeWav } from "./audio/encode.js";
@@ -8,6 +8,7 @@ import { WaveformView } from "./ui/waveform.js";
 import { Player } from "./playback.js";
 import { transcribe, cancelTranscription } from "./transcribe/whisper.js";
 import { toSrt, toTxt, toVtt } from "./transcript/format.js";
+import { findLineIndex, followScrollTop, missingWordMarkers, speechRegions } from "./transcript/view.js";
 import { exportSlice, downloadBlob } from "./export/clips.js";
 import { buildClips, splitLabels } from "./export/boundaries.js";
 import {
@@ -21,7 +22,7 @@ import {
 import { CLICK_PX, SPEED_MAX, SPEED_MIN, clampSpeed, speedAfterDrag, speedFromDrag, stepSpeed } from "./ui/speed.js";
 import { zoomAnchor, zoomAround } from "./ui/view.js";
 import { applyGain } from "./audio/normalize.js";
-import { cleanUp, cleanupActive, cleanupOptions, cleanupSummary } from "./audio/enhance.js";
+import { cleanUp, cleanupActive, cleanupOptions, cleanupSummary, LEVEL_MAX_BOOST_DB, LEVEL_WINDOW_S } from "./audio/enhance.js";
 
 const $ = (id) => document.getElementById(id);
 
@@ -154,6 +155,7 @@ const player = new Player({
     state.cursorSample = sample;
     waveform.setPlayhead(sample);
     $("cursorTime").textContent = fmt(sample);
+    followTranscriptTo(sample / state.sampleRate);
   },
   onEnd: () => setPlayButton(false),
 });
@@ -859,6 +861,7 @@ function currentCleanupOptions() {
   return cleanupOptions({
     rumble: $("cleanRumble").checked,
     denoise: $("cleanDenoise").checked,
+    level: $("cleanLevel").checked,
     consonant: $("cleanConsonant").checked,
     consonantDb: Number($("cleanConsonantDb").value),
     normalize: $("cleanNormalize").checked,
@@ -1141,10 +1144,9 @@ $("transcribeBtn").addEventListener("click", async () => {
   const duration = scope.pcm.length / state.sampleRate;
   const prefixStatus = (status) =>
     status.startsWith("Transcribing") ? status.replace(/^Transcribing/, `Transcribing ${scope.label}`) : status;
-  // Model download/load occupies the first 60% of the bar. transformers.js
-  // reports progress per file, so aggregate the byte counts across files and
-  // clamp the result monotonic: the bar used to jump backwards every time a new
-  // file joined the download (TX-10).
+  // Two phases, each running 0-100%: downloading the model, then transcribing.
+  // A single bar split between the two read as an instant jump to 60% whenever
+  // the model was already cached, and then crawled.
   const loadFiles = new Map();
   let loadFrac = 0;
   const onLoadProgress = (p) => {
@@ -1165,23 +1167,38 @@ $("transcribeBtn").addEventListener("click", async () => {
       total += v.total;
     }
     if (total <= 0) return;
-    loadFrac = Math.max(loadFrac, 0.6 * Math.min(1, loaded / total));
+    loadFrac = Math.max(loadFrac, Math.min(1, loaded / total));
     txFrac(loadFrac);
+    $("txStatus").textContent = `Downloading model… ${Math.round(loadFrac * 100)}%`;
   };
+  txFrac(0);
+  resetTranscriptView();
   try {
-    const raw = await transcribe(scope.pcm, state.sampleRate, $("modelSel").value, {
+    // A speaker further from the microphone transcribes poorly. Level a copy of
+    // the audio before it goes to the model; a gain does not shift time, so the
+    // word timestamps stay valid.
+    $("txStatus").textContent = "Leveling voices…";
+    const input = levelVoices(scope.pcm, state.sampleRate, LEVEL_MAX_BOOST_DB, LEVEL_WINDOW_S);
+    const raw = await transcribe(input, state.sampleRate, $("modelSel").value, {
       language: $("langSel").value || undefined,
-      onStatus: (s) => ($("txStatus").textContent = prefixStatus(s)),
+      onStatus: (s) => {
+        // The pipeline announces the switch, so the bar restarts for the new phase.
+        if (s.startsWith("Transcribing")) txFrac(0);
+        $("txStatus").textContent = prefixStatus(s);
+      },
       onProgress: onLoadProgress,
       onSegment: (segment) => {
         // `end` is the end of the completed sequential input window, so this is
         // real file-fraction progress rather than an estimate.
         const end = segment && typeof segment.end === "number" ? segment.end : 0;
-        const frac = 0.6 + 0.4 * Math.min(1, end / duration);
+        const frac = Math.min(1, end / duration);
         const pct = Math.min(100, Math.round(frac * 100));
         txFrac(frac);
         if (segment && typeof segment.end === "number") {
           $("txStatus").textContent = `Transcribing ${scope.label}… ${pct}% of ${scope.noun}`;
+        }
+        if (segment && segment.chunks && segment.chunks.length) {
+          appendTranscriptChunks(segment.chunks, scope.offsetSeconds);
         }
       },
     });
@@ -1254,45 +1271,25 @@ function transcriptionScope() {
     pcm: state.pcm.subarray(clip.start, clip.end),
   };
 }
-function renderTranscript(result) {
-  const el = $("transcript");
-  el.innerHTML = "";
-  const words = (result.chunks || []).filter((c) => c.timestamp);
-  if (words.length === 0) {
-    el.textContent = result.text || "(empty)";
-    updateTranscriptActions();
-    return;
-  }
+// ── Transcript view ─────────────────────────────────────────────────────────
+// Follow-along state: the rendered lines, their start times for the lookup, the
+// highlighted line, and whether following is on.
+let transcriptLines = [];
+let transcriptStarts = [];
+let transcriptActive = -1;
+let followAudio = true;
+
+/** Group word chunks into transcript lines, one per ~84 characters or sentence. */
+function groupWords(words, offsetSeconds) {
+  const lines = [];
   let group = [];
   const flush = () => {
     if (!group.length) return;
-    const start = group[0].timestamp[0];
-    const end = group[group.length - 1].timestamp[1] ?? group[group.length - 1].timestamp[0];
+    const start = group[0].timestamp[0] + offsetSeconds;
+    const last = group[group.length - 1];
+    const end = (last.timestamp[1] ?? last.timestamp[0]) + offsetSeconds;
     const text = group.map((w) => w.text).join("").trim();
-    const div = document.createElement("div");
-    div.className = "seg";
-    div.title = "Double-click to play from here";
-    div.innerHTML = `<span class="t">${fmt(start * state.sampleRate)}</span><span class="x"></span>`;
-    div.querySelector(".x").textContent = text;
-    div.addEventListener("click", () => {
-      const sample = Math.round(start * state.sampleRate);
-      state.cursorSample = sample;
-      waveform.setPlayhead(sample);
-      $("cursorTime").textContent = fmt(sample);
-      if (player.playing) player.play(sample, currentSpeed());
-    });
-    div.addEventListener("dblclick", async () => {
-      // Double-click must not start playback while Whisper is running (TX-12).
-      if (!state.pcm || transcribing) return;
-      const sample = Math.round(start * state.sampleRate);
-      state.cursorSample = sample;
-      waveform.setPlayhead(sample);
-      $("cursorTime").textContent = fmt(sample);
-      await audioContext().resume();
-      player.play(sample, currentSpeed());
-      setPlayButton(true);
-    });
-    el.appendChild(div);
+    if (text) lines.push({ start, end, text });
     group = [];
   };
   for (const w of words) {
@@ -1301,6 +1298,129 @@ function renderTranscript(result) {
     if (line.length >= TARGET_TRANSCRIPT_CHARS || /[.!?]\s*$/.test(w.text)) flush();
   }
   flush();
+  return lines;
+}
+
+/** One transcript line, wired to seek on click. */
+function transcriptLineEl(item) {
+  const div = document.createElement("div");
+  div.className = item.missing ? "seg missing" : "seg";
+  div.dataset.start = String(item.start);
+  div.title = item.missing
+    ? "Speech here produced no words — possibly unintelligible"
+    : "Double-click to play from here";
+  div.innerHTML = `<span class="t">${fmt(item.start * state.sampleRate)}</span><span class="x"></span>`;
+  div.querySelector(".x").textContent = item.missing ? "**" : item.text;
+  const seek = (start) => {
+    const sample = Math.round(start * state.sampleRate);
+    state.cursorSample = sample;
+    waveform.setPlayhead(sample);
+    $("cursorTime").textContent = fmt(sample);
+  };
+  div.addEventListener("click", () => {
+    seek(item.start);
+    if (player.playing) player.play(state.cursorSample, currentSpeed());
+  });
+  div.addEventListener("dblclick", async () => {
+    // Double-click must not start playback while Whisper is running (TX-12).
+    if (!state.pcm || transcribing) return;
+    seek(item.start);
+    await audioContext().resume();
+    player.play(state.cursorSample, currentSpeed());
+    setPlayButton(true);
+  });
+  return div;
+}
+
+function addTranscriptLine(item) {
+  const el = $("transcript");
+  const div = transcriptLineEl(item);
+  el.appendChild(div);
+  transcriptLines.push({ el: div, start: item.start, end: item.end });
+  transcriptStarts.push(item.start);
+}
+
+function resetTranscriptView() {
+  $("transcript").innerHTML = "";
+  transcriptLines = [];
+  transcriptStarts = [];
+  transcriptActive = -1;
+}
+
+function clearTranscriptHighlight() {
+  if (transcriptActive >= 0 && transcriptLines[transcriptActive]) {
+    transcriptLines[transcriptActive].el.classList.remove("active");
+  }
+  transcriptActive = -1;
+}
+
+/** Scroll so `index` sits four lines down, leaving room for what is coming. */
+function scrollTranscriptToLine(index, behaviour = "smooth") {
+  const line = transcriptLines[index];
+  const box = $("transcript");
+  if (!line || !box) return;
+  const lineHeight = line.el.offsetHeight || 22;
+  box.scrollTo({
+    top: followScrollTop(line.el.offsetTop - box.offsetTop, lineHeight, 4),
+    behavior: behaviour,
+  });
+}
+
+/** Highlight the line being played, four lines from the top (follow audio). */
+function followTranscriptTo(seconds) {
+  if (!followAudio || !transcriptLines.length) return;
+  const index = findLineIndex(transcriptStarts, seconds);
+  if (index === transcriptActive) return;
+  clearTranscriptHighlight();
+  if (index < 0) return;
+  transcriptActive = index;
+  transcriptLines[index].el.classList.add("active");
+  scrollTranscriptToLine(index);
+}
+
+function setFollowAudio(on) {
+  followAudio = on;
+  const btn = $("followTx");
+  if (btn) btn.setAttribute("aria-pressed", on ? "true" : "false");
+  if (!on) clearTranscriptHighlight();
+}
+
+/** Append the chunks a transcription window just produced, as it goes. */
+function appendTranscriptChunks(chunks, offsetSeconds) {
+  const words = (chunks || []).filter((c) => Array.isArray(c.timestamp));
+  if (!words.length) return;
+  for (const item of groupWords(words, offsetSeconds)) addTranscriptLine(item);
+  // Keep the newest line four lines down, the same as during playback.
+  const last = transcriptLines.length - 1;
+  if (last < 0) return;
+  clearTranscriptHighlight();
+  transcriptActive = last;
+  transcriptLines[last].el.classList.add("active");
+  scrollTranscriptToLine(last);
+}
+
+function renderTranscript(result) {
+  resetTranscriptView();
+  const words = (result.chunks || []).filter((c) => c.timestamp);
+  if (words.length === 0) {
+    $("transcript").textContent = result.text || "(empty)";
+    updateTranscriptActions();
+    return;
+  }
+  const items = groupWords(words, 0);
+  // Mark speech that produced no words at all with ** (see missingWordMarkers).
+  const from = items.length ? items[0].start : 0;
+  const to = items.length ? items[items.length - 1].end : 0;
+  if (state.pcm && to > from) {
+    const zones = silenceZones(state.pcm, state.sampleRate, 0.3).map((s) => s / state.sampleRate);
+    const regions = speechRegions(zones, state.pcm.length / state.sampleRate);
+    const spans = words.map((w) => [w.timestamp[0], w.timestamp[1] ?? w.timestamp[0]]);
+    for (const t of missingWordMarkers(regions, spans, from, to)) {
+      items.push({ start: t, end: t, text: "**", missing: true });
+    }
+    items.sort((a, b) => a.start - b.start);
+  }
+  for (const item of items) addTranscriptLine(item);
   updateTranscriptActions();
 }
 
@@ -1331,6 +1451,9 @@ function transcriptDownload(kind) {
 $("downloadTx").addEventListener("click", () => transcriptDownload("txt"));
 $("downloadSrt").addEventListener("click", () => transcriptDownload("srt"));
 $("downloadVtt").addEventListener("click", () => transcriptDownload("vtt"));
+$("followTx").addEventListener("click", () =>
+  setFollowAudio($("followTx").getAttribute("aria-pressed") !== "true")
+);
 
 // ── Export ────────────────────────────────────────────────────────────────────
 function currentClipNames() {

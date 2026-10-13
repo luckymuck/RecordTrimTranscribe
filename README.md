@@ -14,7 +14,7 @@ build the [portable desktop app](#portable) to use it with no network at all.
 1. **Record** audio.
 2. **Load** local audio files.
 3. **Playback** at 1.0×–4.0× while maximizing intelligibility by preserving consonant sounds.
-4. **Clean up** with: rumble filter, RNNoise denoise, consonant boost, normalize, and peak limiter.
+4. **Clean up** with: rumble filter, RNNoise denoise, voice leveling, consonant boost, normalize, and peak limiter.
 5. **Trim/Split** audio into separate clips.
 6. **Transcribe** on-device with Whisper.
 7. **Export/Save** as WAV or MP3.
@@ -60,6 +60,12 @@ build the [portable desktop app](#portable) to use it with no network at all.
     denoising, run at 48 kHz in 10 ms frames and resampled back (on by default).
     Loaded from the vendored build under `app/vendor/rnnoise/`; there is no CDN
     fallback, so nothing can reach out.
+  - **level voices** — brings quiet passages up toward the loud ones (up to
+    12 dB, measured over a 3 s window), so a speaker further from the microphone
+    is heard at about the same level as one close to it. It is a slow leveler,
+    not short-term compression, and it holds the gain through pauses so skip
+    silence still finds the gaps afterwards. The same leveling is applied to the
+    audio fed to transcription, automatically.
   - **consonant boost** — a high-shelf above 2 kHz with a 0–6 dB strength control
     plus light high-band compression, so soft consonants sit closer to the vowels.
   - **normalize** — sets the level, either to a −1 dBFS peak or to −20 dBFS RMS
@@ -77,8 +83,18 @@ build the [portable desktop app](#portable) to use it with no network at all.
 
 ## Transcripts
 
-Transcripts can be generated for the whole file or for a single clip.
-Double-click a transcript line to play the audio from that point.
+Transcripts can be generated for the whole file or for a single clip, and they
+appear **as they are produced** rather than only at the end. Double-click a
+transcript line to play the audio from that point.
+
+**Follow audio** (on by default) highlights the line being played and scrolls it
+to sit four lines from the top, so you can read along with what was just said and
+what is coming. The toggle is beside the Transcribe button.
+
+Speech that produced **no words at all** is marked `**` — a span of speech-shaped
+energy the model did not turn into anything, which usually means it was not
+intelligible. (Per-word confidence is not shown: the transcription library does
+not expose it.)
 
 ## Ways to run it
 
@@ -194,17 +210,18 @@ signing would remove the prompt but needs a certificate.
 
 ```powershell
 cd core
-cargo test            # 65 tests: timing, pitch, PSOLA, WSOLA, streaming, rate,
+cargo test            # 70 tests: timing, pitch, PSOLA, WSOLA, streaming, rate,
                       # step continuity, real-time throughput, skip-silence,
                       # seam envelope, class-aware length, odd sample rates,
-                      # rumble/consonant/limiter stages
+                      # rumble/consonant/level/normalize/limiter stages
 node dsp_smoke.mjs    # WASM bindings end-to-end (needs: npx wasm-pack build --target nodejs)
 
 cd ..
-node --test app/test/*.test.mjs   # 62 JS unit tests: transcript formatting,
+node --test app/test/*.test.mjs   # 69 JS unit tests: transcript formatting,
                                   # filenames, split boundaries, dial and zoom
                                   # arithmetic, WAV encoding, normalization,
-                                  # the clean-up chain and RNNoise
+                                  # the clean-up chain and RNNoise, transcript
+                                  # follow/marker helpers
 ```
 
 CI runs both suites (`.github/workflows/core-tests.yml`, `web-tests.yml`) plus a

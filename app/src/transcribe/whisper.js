@@ -294,6 +294,7 @@ export async function transcribe(pcm, sampleRate, modelId, { onProgress, onStatu
     const audioStartSeconds = seg.audioStart / 16000;
     const assignStartSeconds = seg.assignStart / 16000;
     const assignEndSeconds = seg.assignEnd / 16000;
+    const chunksBefore = chunks.length;
 
     if (wantTimestamps) {
       try {
@@ -368,6 +369,9 @@ export async function transcribe(pcm, sampleRate, modelId, { onProgress, onStatu
         segments: windows.length,
         start: assignStartSeconds,
         end: assignEndSeconds,
+        // What this window produced, so the transcript can appear as it is
+        // transcribed instead of only at the end.
+        chunks: chunks.slice(chunksBefore),
       });
     }
     completedSeconds = assignEndSeconds;

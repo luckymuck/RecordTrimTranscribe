@@ -6,7 +6,7 @@
 // the noise floor, normalize before the limiter (the limiter is the final
 // guard), and the limiter last so it catches everything before it.
 
-import { consonantBoost, highpassFilter, softLimiter } from "../core/dsp.js";
+import { consonantBoost, highpassFilter, levelVoices, softLimiter } from "../core/dsp.js";
 import { applyGain, NORM_RMS_DB, normalizeGain } from "./normalize.js";
 import { denoise } from "./denoise.js";
 
@@ -14,10 +14,14 @@ export const RUMBLE_CUTOFF_HZ = 80;
 export const CONSONANT_CORNER_HZ = 2000;
 export const CONSONANT_MAX_DB = 6;
 export const LIMIT_CEILING_DB = -1;
+/** Leveler: lift quiet passages by at most this much, measured over this window. */
+export const LEVEL_MAX_BOOST_DB = 12;
+export const LEVEL_WINDOW_S = 3;
 
 export const DEFAULT_CLEANUP = {
   rumble: true,
   denoise: true,
+  level: false,
   consonant: false,
   consonantDb: 3,
   normalize: false,
@@ -37,7 +41,7 @@ export function cleanupOptions(partial) {
 /** True when at least one stage is selected. */
 export function cleanupActive(partial) {
   const o = cleanupOptions(partial);
-  return o.rumble || o.denoise || o.consonant || o.normalize || o.loudness;
+  return o.rumble || o.denoise || o.level || o.consonant || o.normalize || o.loudness;
 }
 
 /** Human-readable summary of what a run did. */
@@ -65,6 +69,12 @@ export async function cleanUp(pcm, sampleRate, partial, onProgress) {
     out = await denoise(out, sampleRate, onProgress);
     steps.push("denoised");
   }
+  if (o.level) {
+    // Before the consonant boost, so its level-dependent thresholds see
+    // consistent levels, and before normalize, which still sets the final peak.
+    out = levelVoices(out, sampleRate, LEVEL_MAX_BOOST_DB, LEVEL_WINDOW_S);
+    steps.push("quiet passages lifted");
+  }
   if (o.consonant && o.consonantDb > 0) {
     // Stronger shelf implies proportionally more high-band compression.
     const amount = Math.min(1, o.consonantDb / CONSONANT_MAX_DB);
@@ -84,6 +94,7 @@ export async function cleanUp(pcm, sampleRate, partial, onProgress) {
     out = softLimiter(out, sampleRate, LIMIT_CEILING_DB);
     steps.push(`limited to ${LIMIT_CEILING_DB} dBFS`);
   }
-  const gainOnly = o.normalize && !o.rumble && !o.denoise && !o.consonant && !o.loudness;
+  const gainOnly =
+    o.normalize && !o.rumble && !o.denoise && !o.level && !o.consonant && !o.loudness;
   return { pcm: out, steps, gain: gainOnly ? normalizeGain(pcm, o.normalizeMode) : null };
 }

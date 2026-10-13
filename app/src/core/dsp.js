@@ -7,6 +7,7 @@ import init, {
   consonant_boost,
   highpass,
   initSync,
+  level,
   silence_zones,
   soft_limiter,
   time_stretch,
@@ -88,6 +89,15 @@ export function consonantBoost(pcm, sampleRate, cornerHz, gainDb, amount) {
 /** Soft limiter to `ceilingDb` (S-13). */
 export function softLimiter(pcm, sampleRate, ceilingDb) {
   return soft_limiter(pcm, sampleRate, ceilingDb);
+}
+
+/**
+ * Slow leveler: brings quiet passages up toward the loud ones, so a speaker far
+ * from the microphone is heard at about the same level as one close to it.
+ * `maxBoostDb` caps the lift; `windowS` is how long a "passage" is.
+ */
+export function levelVoices(pcm, sampleRate, maxBoostDb, windowS) {
+  return level(pcm, sampleRate, maxBoostDb, windowS);
 }
 
 /**

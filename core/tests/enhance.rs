@@ -1,4 +1,4 @@
-//! Clean-up stage tests: rumble high-pass, consonant boost, soft limiter.
+﻿//! Clean-up stage tests: rumble high-pass, consonant boost, soft limiter.
 //!
 //! These are single-tone or two-tone probes, so a stage's effect on each band
 //! is measured directly rather than inferred from the waveform.
@@ -122,4 +122,111 @@ fn stages_stay_finite_and_silent_on_silence() {
         assert_eq!(y.len(), x.len());
         assert!(y.iter().all(|v| v.is_finite() && v.abs() < 1e-9));
     }
+}
+
+// â”€â”€ Leveler (uneven speaker levels) â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+
+fn rms(a: &[f64]) -> f64 {
+    (a.iter().map(|v| v * v).sum::<f64>() / a.len() as f64).sqrt()
+}
+
+/// 5 s loud, 5 s quiet (20 dB down), 5 s loud. Longer than the 3 s window so the
+/// envelope can actually track the sections.
+fn uneven(sr: u32) -> Vec<f64> {
+    let mut x = sine(150.0, 5.0, sr, 0.4);
+    x.extend(sine(150.0, 5.0, sr, 0.04));
+    x.extend(sine(150.0, 5.0, sr, 0.4));
+    x
+}
+
+#[test]
+fn leveler_raises_a_quiet_section_and_leaves_the_loud_ones() {
+    let sr = 48000;
+    let x = uneven(sr);
+    let y = enhance::level(&x, sr, 12.0, 3.0);
+    assert_eq!(y.len(), x.len());
+    let n = sr as usize;
+    // Measure the middle of each section, clear of the transitions.
+    let loud_before = rms(&x[1 * n..4 * n]);
+    let loud_after = rms(&y[1 * n..4 * n]);
+    let quiet_before = rms(&x[6 * n..9 * n]);
+    let quiet_after = rms(&y[6 * n..9 * n]);
+
+    assert!(
+        (loud_after / loud_before - 1.0).abs() < 0.05,
+        "loud section should be left alone: {loud_before} -> {loud_after}"
+    );
+    let gain_db = 20.0 * (quiet_after / quiet_before).log10();
+    assert!(
+        gain_db > 6.0,
+        "quiet section should be raised, got {gain_db:.1} dB"
+    );
+    assert!(
+        gain_db <= 12.2,
+        "boost must respect the cap, got {gain_db:.1} dB"
+    );
+}
+
+#[test]
+fn leveler_leaves_pauses_relative_to_their_surroundings() {
+    let sr = 48000;
+    // Speech, then a room-tone pause, then speech again.
+    let mut x = sine(150.0, 2.0, sr, 0.4);
+    x.extend(vec![0.002f64; (2.0 * sr as f64) as usize]); // -54 dBFS room tone
+    x.extend(sine(150.0, 2.0, sr, 0.4));
+    let y = enhance::level(&x, sr, 12.0, 3.0);
+    let n = sr as usize;
+    let speech = rms(&y[0..n]);
+    let pause = rms(&y[3 * n..4 * n]);
+    // The pause must stay far below the speech: lifting it would break the
+    // silence detector, which is the whole reason the gain is held through it.
+    assert!(
+        pause < speech * 0.1,
+        "pause rose to {pause} against speech {speech}"
+    );
+}
+
+#[test]
+fn leveler_keeps_silence_silent_and_stays_finite() {
+    let sr = 48000;
+    let x = vec![0.0f64; sr as usize];
+    let y = enhance::level(&x, sr, 12.0, 3.0);
+    assert_eq!(y.len(), x.len());
+    assert!(y.iter().all(|v| v.is_finite() && v.abs() < 1e-12));
+}
+
+#[test]
+fn silence_is_still_detected_after_leveling() {
+    use fasttalk_core::rate::silence_zones_f32;
+    let sr = 48000;
+    let speech = sine(150.0, 0.5, sr, 0.3);
+    let quiet = sine(150.0, 0.5, sr, 0.03); // 20 dB down: the far speaker
+    let mut x = Vec::new();
+    x.extend(&speech);
+    x.extend(vec![0.0f64; (1.5 * sr as f64) as usize]);
+    x.extend(&quiet);
+    x.extend(vec![0.0f64; (1.5 * sr as f64) as usize]);
+    x.extend(&speech);
+
+    let y = enhance::level(&x, sr, 12.0, 3.0);
+    let y32: Vec<f32> = y.iter().map(|v| *v as f32).collect();
+    let zones = silence_zones_f32(&y32, sr, 0.5);
+    assert_eq!(
+        zones.len(),
+        4,
+        "expected the two gaps to survive leveling, got {zones:?}"
+    );
+}
+
+#[test]
+fn leveler_does_not_introduce_steps() {
+    let sr = 48000;
+    let x = uneven(sr);
+    let y = enhance::level(&x, sr, 12.0, 3.0);
+    let source_step = x.windows(2).map(|w| (w[1] - w[0]).abs()).fold(0.0f64, f64::max);
+    let out_step = y.windows(2).map(|w| (w[1] - w[0]).abs()).fold(0.0f64, f64::max);
+    assert!(
+        out_step <= source_step * 4.0,
+        "leveling introduced a step: {out_step} against {source_step}"
+    );
 }

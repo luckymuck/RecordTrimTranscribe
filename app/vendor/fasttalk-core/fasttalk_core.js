@@ -230,6 +230,25 @@ export function highpass(samples, sample_rate, cutoff_hz) {
 }
 
 /**
+ * Slow leveler: brings quiet passages up toward the loud ones, capped at
+ * `max_boost_db` over a `window_s` window. Used both by the clean-up chain and
+ * to level the audio fed to transcription.
+ * @param {Float32Array} samples
+ * @param {number} sample_rate
+ * @param {number} max_boost_db
+ * @param {number} window_s
+ * @returns {Float32Array}
+ */
+export function level(samples, sample_rate, max_boost_db, window_s) {
+    const ptr0 = passArrayF32ToWasm0(samples, wasm.__wbindgen_malloc);
+    const len0 = WASM_VECTOR_LEN;
+    const ret = wasm.level(ptr0, len0, sample_rate, max_boost_db, window_s);
+    var v2 = getArrayF32FromWasm0(ret[0], ret[1]).slice();
+    wasm.__wbindgen_free(ret[0], ret[1] * 4, 4);
+    return v2;
+}
+
+/**
  * Silence runs longer than `min_silence_s`, as flat `[start, end, ...]` sample
  * positions. Boundaries are the raw detected silence edges; the caller insets
  * them by the speed-dependent keep.

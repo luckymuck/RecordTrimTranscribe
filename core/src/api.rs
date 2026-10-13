@@ -332,6 +332,19 @@ pub fn soft_limiter(samples: &[f32], sample_rate: u32, ceiling_db: f64) -> Vec<f
     to_f32(enhance::soft_limiter(&to_f64(samples), sample_rate, ceiling_db))
 }
 
+/// Slow leveler: brings quiet passages up toward the loud ones, capped at
+/// `max_boost_db` over a `window_s` window. Used both by the clean-up chain and
+/// to level the audio fed to transcription.
+#[wasm_bindgen]
+pub fn level(samples: &[f32], sample_rate: u32, max_boost_db: f64, window_s: f64) -> Vec<f32> {
+    to_f32(enhance::level(
+        &to_f64(samples),
+        sample_rate,
+        max_boost_db,
+        window_s,
+    ))
+}
+
 /// Offline render with silence longer than `min_silence_s` cut down to a `keep_s`
 /// pause, then the rest stretched to `speed`.
 ///

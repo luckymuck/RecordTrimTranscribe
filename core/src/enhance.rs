@@ -127,6 +127,92 @@ pub fn consonant_boost(x: &[f64], sr: u32, corner_hz: f64, gain_db: f64, amount:
     out
 }
 
+/// Frame RMS in dBFS: 20 ms frames on a 10 ms hop.
+fn frame_levels_db(x: &[f64], sr: u32) -> Vec<f64> {
+    let frame = ((0.020 * sr as f64) as usize).max(2);
+    let hop = ((0.010 * sr as f64) as usize).max(1);
+    if x.len() < frame {
+        return Vec::new();
+    }
+    let n = 1 + (x.len() - frame) / hop;
+    (0..n)
+        .map(|i| {
+            let base = i * hop;
+            let sum: f64 = x[base..base + frame].iter().map(|v| v * v).sum();
+            20.0 * (sum / frame as f64).sqrt().max(EPS).log10()
+        })
+        .collect()
+}
+
+/// Moving average over `width` frames, with the window truncated at the edges.
+fn moving_average(v: &[f64], width: usize) -> Vec<f64> {
+    let n = v.len();
+    if n == 0 || width <= 1 {
+        return v.to_vec();
+    }
+    let half = (width / 2) as isize;
+    let mut out = vec![0.0f64; n];
+    for i in 0..n {
+        let lo = (i as isize - half).max(0) as usize;
+        let hi = ((i as isize + half + 1) as usize).min(n);
+        let sum: f64 = v[lo..hi].iter().sum();
+        out[i] = sum / (hi - lo) as f64;
+    }
+    out
+}
+
+/// Bring quiet passages up toward the level of the loud ones.
+///
+/// This is a seconds-long leveler, not short-term compression: the problem it
+/// addresses is a whole sentence or section being quieter, as when one speaker
+/// is far from the microphone. Gain is applied only upward, capped at
+/// `max_boost_db`, and it is *held* below a gate so pauses are not lifted --
+/// which is what keeps silence detection working on the result. The gain curve
+/// is then smoothed so there is no step at a section boundary.
+pub fn level(x: &[f64], sr: u32, max_boost_db: f64, window_s: f64) -> Vec<f64> {
+    let levels = frame_levels_db(x, sr);
+    if levels.is_empty() {
+        return x.to_vec();
+    }
+    let hop = ((0.010 * sr as f64) as usize).max(1);
+    let width = ((window_s * sr as f64 / hop as f64).round() as usize).max(1);
+    let smoothed = moving_average(&levels, width);
+
+    // The loud level is a high percentile of the smoothed envelope, so a single
+    // spike cannot set the target -- the same reasoning as the silence detector.
+    let mut sorted = smoothed.clone();
+    sorted.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
+    let loud_db = sorted[(sorted.len() * 90) / 100];
+    let gate_db = loud_db - 40.0;
+
+    let mut gains = vec![1.0f64; smoothed.len()];
+    let mut held = 1.0f64;
+    for (i, db) in smoothed.iter().enumerate() {
+        if *db <= gate_db {
+            // A pause keeps whatever gain its surroundings had.
+            gains[i] = held;
+        } else {
+            let boost = (loud_db - db).clamp(0.0, max_boost_db);
+            gains[i] = 10f64.powf(boost / 20.0);
+            held = gains[i];
+        }
+    }
+    let smooth_width = ((0.3 * sr as f64 / hop as f64).round() as usize).max(1);
+    let gains = moving_average(&gains, smooth_width);
+
+    // Apply, interpolating between frame centres.
+    let mut out = Vec::with_capacity(x.len());
+    for (i, &v) in x.iter().enumerate() {
+        let pos = i as f64 / hop as f64;
+        let f = pos.floor() as usize;
+        let frac = pos - f as f64;
+        let g0 = gains.get(f).copied().unwrap_or(1.0);
+        let g1 = gains.get(f + 1).copied().unwrap_or(g0);
+        out.push(v * (g0 + (g1 - g0) * frac));
+    }
+    out
+}
+
 /// Soft-knee waveshaper that asymptotes just below `ceiling`.
 fn soft_knee(v: f64, ceiling: f64) -> f64 {
     let knee = 0.9 * ceiling;

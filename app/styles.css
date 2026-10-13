@@ -138,6 +138,11 @@ select { background: var(--card2); color: var(--ink); border: 1px solid var(--li
 .seg:hover { background: var(--card2); }
 .seg .t { color: var(--accent); font-variant-numeric: tabular-nums; flex-shrink: 0; font-size: 0.72rem; padding-top: 0.05rem; }
 .seg .x { color: var(--ink); }
+/* The line being played, while follow audio is on. */
+.seg.active { background: rgba(94, 234, 212, 0.14); box-shadow: inset 2px 0 0 var(--accent); }
+.seg.active .t { color: #bff7ec; }
+/* Speech that produced no words at all. */
+.seg.missing .x { color: var(--muted); font-weight: 600; letter-spacing: 0.1em; }
 
 .cliplist { margin-top: 0.55rem; display: flex; flex-direction: column; gap: 0.3rem; }
 .clip { display: flex; align-items: center; gap: 0.5rem; background: var(--card2); border: 1px solid var(--line); border-radius: 6px; padding: 0.25rem 0.5rem; font-size: 0.8rem; }

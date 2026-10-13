@@ -90,6 +90,7 @@
         <input type="range" id="cleanConsonantDb" min="0" max="6" step="1" value="3" aria-label="Consonant boost strength in dB">
         <span class="muted" id="cleanConsonantVal">3 dB</span>
       </label>
+      <label class="chk" title="Bring quiet passages up toward the loud ones (up to 12 dB over a 3 s window), so a speaker further from the microphone is heard at about the same level. Pauses are left alone, so skip silence still works."><input type="checkbox" id="cleanLevel"> level voices</label>
       <label class="chk" title="Set the recording's level: peak scales the loudest sample to −1 dBFS; rms scales so the average level hits −20 dBFS, keeping the peak under −1 dBFS."><input type="checkbox" id="cleanNormalize"> normalize</label>
       <label class="chk">mode
         <select id="normMode" class="sm-select" aria-label="Normalize mode">
@@ -156,6 +157,8 @@
           <option value="ko">Korean</option>
         </select>
       </label>
+      <button class="btn sm toggle" id="followTx" aria-pressed="true"
+        title="Highlight the line being played and keep it four lines from the top, so you can read along">follow audio</button>
       <span class="muted" id="txStatus"></span>
     </div>
     <div class="progress"><div id="txProgress"></div></div>

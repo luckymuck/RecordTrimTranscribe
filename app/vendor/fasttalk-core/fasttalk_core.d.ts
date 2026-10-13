@@ -81,6 +81,13 @@ export function consonant_boost(samples: Float32Array, sample_rate: number, corn
 export function highpass(samples: Float32Array, sample_rate: number, cutoff_hz: number): Float32Array;
 
 /**
+ * Slow leveler: brings quiet passages up toward the loud ones, capped at
+ * `max_boost_db` over a `window_s` window. Used both by the clean-up chain and
+ * to level the audio fed to transcription.
+ */
+export function level(samples: Float32Array, sample_rate: number, max_boost_db: number, window_s: number): Float32Array;
+
+/**
  * Silence runs longer than `min_silence_s`, as flat `[start, end, ...]` sample
  * positions. Boundaries are the raw detected silence edges; the caller insets
  * them by the speed-dependent keep.
@@ -137,6 +144,7 @@ export interface InitOutput {
     readonly bakedmap_new: (a: number, b: number, c: number, d: number, e: number) => number;
     readonly consonant_boost: (a: number, b: number, c: number, d: number, e: number, f: number) => [number, number];
     readonly highpass: (a: number, b: number, c: number, d: number) => [number, number];
+    readonly level: (a: number, b: number, c: number, d: number, e: number) => [number, number];
     readonly silence_zones: (a: number, b: number, c: number, d: number) => [number, number];
     readonly skipbakedmap_map_position: (a: number, b: number) => number;
     readonly skipbakedmap_new: (a: number, b: number, c: number, d: number, e: number, f: number, g: number) => number;

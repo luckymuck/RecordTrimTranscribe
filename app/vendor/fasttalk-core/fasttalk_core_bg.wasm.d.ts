@@ -9,6 +9,7 @@ export const bakedmap_map_position: (a: number, b: number) => number;
 export const bakedmap_new: (a: number, b: number, c: number, d: number, e: number) => number;
 export const consonant_boost: (a: number, b: number, c: number, d: number, e: number, f: number) => [number, number];
 export const highpass: (a: number, b: number, c: number, d: number) => [number, number];
+export const level: (a: number, b: number, c: number, d: number, e: number) => [number, number];
 export const silence_zones: (a: number, b: number, c: number, d: number) => [number, number];
 export const skipbakedmap_map_position: (a: number, b: number) => number;
 export const skipbakedmap_new: (a: number, b: number, c: number, d: number, e: number, f: number, g: number) => number;
