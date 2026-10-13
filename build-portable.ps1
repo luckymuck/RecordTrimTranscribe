@@ -30,8 +30,15 @@ if (-not (Test-Path -LiteralPath $probe)) {
 }
 
 Write-Host "1/4  Building the WASM core"
+# wasm-pack writes its progress to stderr, and PowerShell 5.1 turns a redirected
+# native stderr into a terminating error while $ErrorActionPreference is Stop.
+# Relax it around the call and check the exit code explicitly instead.
+$strict = $ErrorActionPreference
+$ErrorActionPreference = "Continue"
 & cmd /c "`"$(Join-Path $root 'build-wasm.bat')`""
-if ($LASTEXITCODE -ne 0) { throw "build-wasm.bat failed" }
+$wasmCode = $LASTEXITCODE
+$ErrorActionPreference = $strict
+if ($wasmCode -ne 0) { throw "build-wasm.bat failed" }
 
 Write-Host "2/4  Staging the frontend (app + models)"
 if (Test-Path -LiteralPath $frontend) { Remove-Item -Recurse -Force -LiteralPath $frontend }
