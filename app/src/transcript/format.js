@@ -110,3 +110,28 @@ export function toTxt(result) {
   if (!text) return "";
   return text.replace(/\s*([.!?])\s+/g, "$1\n") + "\n";
 }
+
+/** Marker so a stray JSON file is not mistaken for a transcript. */
+export const TRANSCRIPT_FORMAT = "rtt-transcript";
+
+/**
+ * This app's own transcript as JSON, for reloading without re-transcribing.
+ *
+ * Word timings survive exactly, which SRT and VTT cannot carry, and the source
+ * name and duration let a reload check that the transcript belongs to the audio
+ * it is paired with.
+ */
+export function toTranscriptJson(result, { source = "", sampleRate = 0, duration = 0 } = {}) {
+  return (
+    JSON.stringify({
+      format: TRANSCRIPT_FORMAT,
+      version: 1,
+      source: String(source || ""),
+      sampleRate: Number(sampleRate) || 0,
+      duration: Number(duration) || 0,
+      timestamped: !!(result && result.timestamped),
+      text: (result && result.text) || "",
+      chunks: (result && result.chunks) || null,
+    }) + "\n"
+  );
+}

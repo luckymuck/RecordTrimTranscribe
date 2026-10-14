@@ -17,7 +17,8 @@ app/                     The whole product surface (static, client-side)
     ui/view.js           zoom/pan arithmetic
     playback.js          streaming (real-time) + offline bake
     transcribe/whisper.js  transformers.js Whisper pipeline
-    transcript/format.js   SRT / VTT / plain-text export formatting
+    transcript/format.js   SRT / VTT / plain-text / JSON export formatting
+    transcript/parse.js    SRT / VTT / plain-text / JSON import
     transcript/view.js     follow-along lookup and missing-word markers
     export/clips.js      split/slice + download
     export/boundaries.js split validation and clip boundaries

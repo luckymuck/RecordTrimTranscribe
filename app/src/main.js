@@ -2,12 +2,14 @@
 import { initDsp, getDspVersion, makeBakedMap, makeSkipBakedMap, timeStretchSkipSilence, silenceZones, softLimiter, levelVoices, highpassFilter } from "./core/dsp.js";
 import { decodeAudioBlob, audioContext } from "./audio/decode.js";
 import { Recorder } from "./audio/record.js";
-import { encode, encodeAsync, encodeWav } from "./audio/encode.js";
+import { encodeAsync, encodeWav } from "./audio/encode.js";
+import { readWavTranscript, withoutTranscript } from "./audio/wav.js";
 import { appendChunk, closeStorage, createSession, deleteSession, listSessions, loadSession, replaceSnapshot, requestPersistentStorage, storageAvailable, storageEstimate } from "./storage.js";
 import { WaveformView } from "./ui/waveform.js";
 import { Player } from "./playback.js";
 import { transcribe, cancelTranscription } from "./transcribe/whisper.js";
-import { toSrt, toTxt, toVtt } from "./transcript/format.js";
+import { toSrt, toTranscriptJson, toTxt, toVtt } from "./transcript/format.js";
+import { isTranscriptName, parseTranscriptText } from "./transcript/parse.js";
 import { findLineIndex, followScrollTop, missingWordMarkers, speechRegions } from "./transcript/view.js";
 import { exportSlice, downloadBlob } from "./export/clips.js";
 import { buildClips, splitLabels } from "./export/boundaries.js";
@@ -17,6 +19,7 @@ import {
   clipName,
   exportBaseName,
   recordingName,
+  transcriptName,
   wholeExportName,
 } from "./util/filenames.js";
 import { CLICK_PX, SPEED_MAX, SPEED_MIN, clampSpeed, speedAfterDrag, speedFromDrag, stepSpeed } from "./ui/speed.js";
@@ -439,6 +442,7 @@ function setSource(pcm, sampleRate, label, { autosave = true, saved = false, ses
   updateSplitLabels();
   $("transcript").innerHTML = "";
   $("txActions").style.display = "none";
+  setImportedTranscript("");
   $("cursorTime").textContent = "—";
   setPlayButton(false);
 }
@@ -720,6 +724,27 @@ $("stopRecBtn").addEventListener("click", async () => {
 });
 
 // ── Load file ─────────────────────────────────────────────────────────────────
+/**
+ * The transcript a WAV backup carries, with the WAV to decode instead.
+ *
+ * Only WAV is checked: re-reading the bytes of every file would double the I/O
+ * for the common case of an MP3 or M4A, which cannot carry the chunk anyway.
+ */
+async function embeddedTranscript(file) {
+  if (!/\.wav$/i.test(file.name || "") && file.type !== "audio/wav") return null;
+  try {
+    const buffer = await file.arrayBuffer();
+    const text = readWavTranscript(buffer);
+    if (!text) return null;
+    // Decode without the chunk, so the browser's decoder sees exactly the bytes
+    // an ordinary WAV would have.
+    const audio = new Blob([withoutTranscript(buffer)], { type: file.type || "audio/wav" });
+    return { parsed: parseTranscriptText(text, `${file.name}.json`), audio };
+  } catch (e) {
+    return null;
+  }
+}
+
 /** Decode `file` and make it the source. Returns false when it was refused. */
 async function loadAudioFile(file) {
   if (transcribing) return false;
@@ -733,11 +758,13 @@ async function loadAudioFile(file) {
     );
     if (!ok) return false;
   }
+  const carried = await embeddedTranscript(file);
   try {
     await withBusy(`Loading ${file.name}…`, async () => {
-      const d = await decodeAudioBlob(file);
+      const d = await decodeAudioBlob(carried ? carried.audio : file);
       // The file is already on disk: no IndexedDB copy, and not "unsaved".
       setSource(d.pcm, d.sampleRate, file.name, { autosave: false, saved: true });
+      if (carried) applyImportedTranscript(carried.parsed, `${file.name} (embedded)`);
     });
   } catch (err) {
     const detail = err && err.message ? err.message : String(err);
@@ -802,10 +829,25 @@ window.addEventListener("drop", async (e) => {
   e.preventDefault();
   dragDepth = 0;
   setDropOverlay(false);
-  const file = e.dataTransfer && e.dataTransfer.files && e.dataTransfer.files[0];
-  if (!file) return;
-  if (!looksLikeAudio(file)) {
-    alert(`"${file.name}" is not an audio file.`);
+  const files = e.dataTransfer ? Array.from(e.dataTransfer.files || []) : [];
+  if (!files.length) return;
+  // A transcript can be dropped on its own, or together with its audio. The two
+  // are paired by base name, so dropping both files is enough to reload a
+  // session without re-transcribing.
+  const transcripts = files.filter((f) => isTranscriptName(f.name));
+  const audio = files.find((f) => !isTranscriptName(f.name) && looksLikeAudio(f));
+  if (!audio && transcripts.length) {
+    if (!state.pcm) {
+      $("txStatus").textContent = "Load the audio first, so the transcript can be matched to it";
+      return;
+    }
+    for (const file of transcripts) {
+      if (!(await loadTranscriptFile(file))) break;
+    }
+    return;
+  }
+  if (!audio) {
+    alert(`"${files[0].name}" is not an audio file.`);
     return;
   }
   if (recorder.status() !== "idle") {
@@ -816,11 +858,17 @@ window.addEventListener("drop", async (e) => {
     // Anything already loaded or recorded would be replaced, so ask first --
     // whether or not it has been exported.
     const unsaved = state.saved ? "" : " It has not been exported, so save a backup first if you need it.";
-    if (!confirm(`"${state.sourceName}" is already loaded. Replace it with "${file.name}"?${unsaved}`)) {
+    if (!confirm(`"${state.sourceName}" is already loaded. Replace it with "${audio.name}"?${unsaved}`)) {
       return;
     }
   }
-  await loadAudioFile(file);
+  const loaded = await loadAudioFile(audio);
+  if (!loaded) return;
+  // Prefer a transcript that shares the audio's name; otherwise take the first.
+  const base = exportBaseName(audio.name).toLowerCase();
+  const match =
+    transcripts.find((f) => exportBaseName(f.name).toLowerCase() === base) || transcripts[0];
+  if (match) await loadTranscriptFile(match);
 });
 
 // ── Waveform tools ──────────────────────────────────────────────────────────
@@ -1296,9 +1344,20 @@ $("saveBackup").addEventListener("click", async () => {
   }
   await withBusy("Saving backup…", async () => {
     try {
-      const out = encode(state.pcm, state.sampleRate, "wav");
+      // The transcript rides along in a LIST/INFO chunk, so one file reloads
+      // audio and transcript together and needs no re-transcribing. Players and
+      // decoders ignore the chunk, so this is still an ordinary WAV.
+      const transcript = state.transcript
+        ? toTranscriptJson(state.transcript, {
+            source: state.sourceName,
+            sampleRate: state.sampleRate,
+            duration: state.pcm.length / state.sampleRate,
+          })
+        : "";
+      const out = encodeWav(state.pcm, state.sampleRate, { transcript });
       downloadBlob(out, backupName(state.sourceName));
       markSaved();
+      $("saveStatus").textContent = transcript ? "saved ✓ (with transcript)" : "saved ✓";
     } catch (err) {
       $("saveStatus").textContent = `Backup failed: ${err.message}`;
     }
@@ -1459,6 +1518,8 @@ $("transcribeBtn").addEventListener("click", async () => {
     });
     const fresh = offsetTranscriptTimestamps(raw, scope.offsetSeconds);
     state.transcript = mergeTranscript(state.transcript, fresh, scope);
+    // This transcript is from this session now, whatever was imported before.
+    setImportedTranscript("");
     renderTranscript(state.transcript);
     updateSplitLabels();
     $("txActions").style.display = "flex";
@@ -1715,22 +1776,107 @@ function updateTranscriptActions() {
   set("downloadTx", !!t);
   set("downloadSrt", hasWords);
   set("downloadVtt", hasWords);
+  set("downloadJson", !!t);
+}
+
+/**
+ * Name a transcript export after the source, so `<base>.srt` sits beside
+ * `<base>.mp3`. Timestamps always refer to the unbaked source, so the speed and
+ * silence suffixes an audio export may carry are deliberately not applied: a
+ * transcript labelled `-2.00x` would claim timings it does not have.
+ */
+function transcriptFilename(kind) {
+  return transcriptName(state.sourceName, kind);
 }
 
 function transcriptDownload(kind) {
   const t = state.transcript;
   if (!t) return;
-  const body = kind === "srt" ? toSrt(t.chunks) : kind === "vtt" ? toVtt(t.chunks) : toTxt(t);
+  const body =
+    kind === "srt"
+      ? toSrt(t.chunks)
+      : kind === "vtt"
+        ? toVtt(t.chunks)
+        : kind === "json"
+          ? toTranscriptJson(t, {
+              source: state.sourceName,
+              sampleRate: state.sampleRate,
+              duration: state.pcm ? state.pcm.length / state.sampleRate : 0,
+            })
+          : toTxt(t);
   if (!body) {
     $("txStatus").textContent = "Nothing timestamped to export";
     return;
   }
-  downloadBlob(new Blob([body], { type: kind === "vtt" ? "text/vtt" : "text/plain" }), `transcript.${kind}`);
+  const type = kind === "vtt" ? "text/vtt" : kind === "json" ? "application/json" : "text/plain";
+  downloadBlob(new Blob([body], { type }), transcriptFilename(kind));
 }
 
 $("downloadTx").addEventListener("click", () => transcriptDownload("txt"));
 $("downloadSrt").addEventListener("click", () => transcriptDownload("srt"));
 $("downloadVtt").addEventListener("click", () => transcriptDownload("vtt"));
+$("downloadJson").addEventListener("click", () => transcriptDownload("json"));
+
+/** Show, or clear, the marker for a transcript that was loaded from a file. */
+function setImportedTranscript(name) {
+  const badge = $("txImported");
+  if (!badge) return;
+  badge.hidden = !name;
+  badge.textContent = name ? `imported: ${name}` : "";
+  badge.title = name ? `Loaded from ${name}, not transcribed in this session` : "";
+}
+
+/**
+ * Adopt a transcript parsed from a file. Warns when it does not look like it
+ * belongs to the loaded audio: the wrong sidecar is easy to pick.
+ */
+function applyImportedTranscript(parsed, name) {
+  const duration = state.pcm ? state.pcm.length / state.sampleRate : 0;
+  const stated = parsed.meta && parsed.meta.duration;
+  const lastCue = parsed.chunks && parsed.chunks.length
+    ? parsed.chunks[parsed.chunks.length - 1].timestamp[1]
+    : null;
+  const claimed = Number.isFinite(stated) ? stated : lastCue;
+  if (claimed && duration && Math.abs(claimed - duration) > Math.max(2, duration * 0.02)) {
+    const ok = confirm(
+      `"${name}" runs to ${claimed.toFixed(1)}s but the loaded audio is ${duration.toFixed(1)}s. ` +
+        `Load it anyway?`
+    );
+    if (!ok) return false;
+  }
+  state.transcript = { text: parsed.text, chunks: parsed.chunks, timestamped: parsed.timestamped };
+  renderTranscript(state.transcript);
+  setImportedTranscript(name);
+  $("txActions").style.display = "flex";
+  $("txStatus").textContent = parsed.timestamped
+    ? `Loaded ${parsed.chunks.length} cue${parsed.chunks.length === 1 ? "" : "s"} from ${name}`
+    : `Loaded text from ${name} (no timings)`;
+  return true;
+}
+
+/** Read and adopt a transcript file. */
+async function loadTranscriptFile(file) {
+  try {
+    const parsed = parseTranscriptText(await file.text(), file.name);
+    return applyImportedTranscript(parsed, file.name);
+  } catch (err) {
+    const detail = err && err.message ? err.message : String(err);
+    alert(`Could not read "${file.name}" as a transcript: ${detail}`);
+    return false;
+  }
+}
+
+$("txInput").addEventListener("change", async (e) => {
+  const file = e.target.files[0];
+  e.target.value = "";
+  if (!file) return;
+  if (!state.pcm) {
+    $("txStatus").textContent = "Load the audio first, so the transcript can be matched to it";
+    return;
+  }
+  await loadTranscriptFile(file);
+});
+
 $("followTx").addEventListener("click", () =>
   setFollowAudio($("followTx").getAttribute("aria-pressed") !== "true")
 );

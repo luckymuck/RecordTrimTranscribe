@@ -114,6 +114,20 @@ timestamp, so the word timings stay valid either way.
 to sit four lines from the top, so you can read along with what was just said and
 what is coming. The toggle is beside the Transcribe button.
 
+**Reopening without re-transcribing.** Transcripts export as `.txt`, `.srt`,
+`.vtt` and `.json`, named after the source so `<base>.srt` sits beside
+`<base>.mp3`. Timestamps always refer to the unbaked source, so a speed or
+silence-stripped audio export carries no matching suffix here. A transcript can
+be loaded back with **Load transcript** (`.srt`, `.vtt`, `.txt` or `.json`) or by
+dropping it on the page — dropping the audio and its transcript together pairs
+them by name. A loaded transcript is marked *imported* until something is
+transcribed in the session. The `.json` form round-trips exactly, word timings
+included; SRT and VTT carry cue timings only, so they reload one chunk per cue.
+**Save backup** embeds the transcript in the WAV, so that one file reloads audio
+and transcript together: the chunk is a standard `LIST`/`INFO` comment that
+players ignore, and it is stripped before decoding so it cannot affect how the
+audio loads.
+
 Speech that produced **no words at all** is marked `**` — a span of speech-shaped
 energy the model did not turn into anything, which usually means it was not
 intelligible. (Per-word confidence is not shown: the transcription library does
@@ -247,12 +261,13 @@ cargo test            # 77 tests: timing, pitch, PSOLA, WSOLA, streaming, rate,
 node dsp_smoke.mjs    # WASM bindings end-to-end (needs: npx wasm-pack build --target nodejs)
 
 cd ..
-node --test app/test/*.test.mjs   # 77 JS unit tests: transcript formatting,
-                                  # filenames, split boundaries, dial and zoom
-                                  # arithmetic, WAV encoding, speech-active
-                                  # normalization, clean-up scopes, the clean-up
-                                  # chain and RNNoise, transcript follow/marker
-                                  # helpers
+node --test app/test/*.test.mjs   # 89 JS unit tests: transcript formatting and
+                                  # parsing (SRT/VTT/JSON), filenames, split
+                                  # boundaries, dial and zoom arithmetic, WAV
+                                  # encoding and the embedded transcript,
+                                  # speech-active normalization, clean-up scopes,
+                                  # the clean-up chain and RNNoise, transcript
+                                  # follow/marker helpers
 ```
 
 CI runs both suites (`.github/workflows/core-tests.yml`, `web-tests.yml`) plus a

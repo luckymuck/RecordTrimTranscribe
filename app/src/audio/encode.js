@@ -13,10 +13,11 @@ function floatToInt16(pcm, dither = false, rng = Math.random) {
  *
  * Dither and a soft knee are applied by `wav.js`; MP3 quantization below uses
  * the same conversion without dither, because the lossy codec that follows
- * dominates any quantization noise.
+ * dominates any quantization noise. `opts.transcript` embeds a transcript in a
+ * LIST/INFO chunk, which is how a backup carries it.
  */
-export function encodeWav(pcm, sampleRate) {
-  return encodeWavBlob(pcm, sampleRate);
+export function encodeWav(pcm, sampleRate, opts) {
+  return encodeWavBlob(pcm, sampleRate, opts);
 }
 
 /**

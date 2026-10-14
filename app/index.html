@@ -170,6 +170,8 @@
       <button class="btn sm toggle" id="followTx" aria-pressed="true"
         title="Highlight the line being played and keep it four lines from the top, so you can read along">follow audio</button>
       <label class="chk" title="Transcribe the cleaned audio instead of the original. Denoising and the consonant shelf are tuned for listening and can remove detail the model uses, so the original is the default."><input type="checkbox" id="txCleaned"> cleaned audio</label>
+      <label class="btn file" id="loadTxLabel" title="Load a transcript (.srt, .vtt, .txt or .json) instead of transcribing again. A backup WAV carries its own transcript and needs no separate file.">Load transcript<input type="file" id="txInput" accept=".srt,.vtt,.txt,.json,text/plain,application/json" hidden></label>
+      <span class="badge2" id="txImported" hidden></span>
       <span class="muted" id="txStatus"></span>
     </div>
     <div class="progress"><div id="txProgress"></div></div>
@@ -178,6 +180,7 @@
       <button class="btn sm" id="downloadTx">⬇ Download .txt</button>
       <button class="btn sm" id="downloadSrt">⬇ Download .srt</button>
       <button class="btn sm" id="downloadVtt">⬇ Download .vtt</button>
+      <button class="btn sm" id="downloadJson" title="This app's own transcript format: reloads without re-transcribing, word timings intact">⬇ Download .json</button>
     </div>
   </section>
 </main>

@@ -39,6 +39,15 @@ export function backupName(sourceName) {
   return `${exportBaseName(sourceName)}-backup.wav`;
 }
 
+/**
+ * Transcript export name: the source base name, so `<base>.srt` sits beside
+ * `<base>.mp3`. Timestamps always refer to the unbaked source, so the
+ * speed and silence suffixes an audio export may carry are not applied here.
+ */
+export function transcriptName(sourceName, kind = "srt") {
+  return `${exportBaseName(sourceName)}.${kind}`;
+}
+
 /** `HHMMSS` for a position in the recording (13:45 -> "001345"). */
 export function clockStamp(seconds) {
   const total = Math.max(0, Math.floor(Number.isFinite(seconds) ? seconds : 0));

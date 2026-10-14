@@ -99,6 +99,19 @@ main { max-width: 960px; margin: 0 auto; padding: 0.8rem 1rem 1.4rem; display: f
 /* Device settings: a second row, revealed by its toggle. */
 .device-row { border-top: 1px dashed var(--line); padding-top: 0.35rem; }
 
+/* Marks a transcript that was loaded rather than produced in this session. */
+.badge2 {
+  font-size: 0.72rem;
+  padding: 0.05rem 0.4rem;
+  border: 1px solid var(--line);
+  border-radius: 999px;
+  color: var(--muted);
+  white-space: nowrap;
+  max-width: 16rem;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
 /* Whole-page drop target for loading an audio file. */
 .drop-overlay {
   position: fixed;

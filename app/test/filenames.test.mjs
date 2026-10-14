@@ -9,6 +9,7 @@ import {
   recordingName,
   sanitizeName,
   stripExtension,
+  transcriptName,
   wholeExportName,
 } from "../src/util/filenames.js";
 
@@ -43,8 +44,12 @@ test("wholeExportName keeps the speed even when silence is skipped", () => {
   assert.equal(wholeExportName("talk.mp3", { skip: true, speed: 4, format: "mp3" }), "talk-nosilence.mp3");
 });
 
-test("backupName", () => {
-  assert.equal(backupName("talk.mp3"), "talk-backup.wav");
+test("transcriptName keeps the source base and the kind", () => {
+  assert.equal(transcriptName("a.v2.final.mp3", "srt"), "a.v2.final.srt");
+  assert.equal(transcriptName("", "json"), "recording.json");
+});
+
+test("backupName", () => {  assert.equal(backupName("talk.mp3"), "talk-backup.wav");
 });
 
 test("clockStamp formats a position as HHMMSS", () => {

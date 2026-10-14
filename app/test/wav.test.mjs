@@ -1,6 +1,13 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { encodeWavBuffer, quantize, SOFT_KNEE, softClipSample } from "../src/audio/wav.js";
+import {
+  encodeWavBuffer,
+  quantize,
+  readWavTranscript,
+  SOFT_KNEE,
+  softClipSample,
+  withoutTranscript,
+} from "../src/audio/wav.js";
 
 const str = (view, off, len) => {
   let s = "";
@@ -78,4 +85,50 @@ test("dither stays within one LSB of the undithered value", () => {
 
 test("a zero rng leaves the sample unchanged", () => {
   assert.equal(quantize(0.25, true, () => 0.5), quantize(0.25, false));
+});
+
+test("a transcript embedded in a WAV reads back, and the audio is unchanged", () => {
+  const pcm = new Float32Array([0, 0.5, -0.5, 0.25]);
+  const transcript = '{"format":"rtt-transcript","text":"hi"}';
+  const plain = encodeWavBuffer(pcm, 48000, { dither: false });
+  const withTx = encodeWavBuffer(pcm, 48000, { dither: false, transcript });
+
+  assert.equal(readWavTranscript(plain), "", "a WAV without one reports none");
+  assert.equal(readWavTranscript(withTx), transcript);
+  // The samples are untouched and the RIFF size covers the extra chunk.
+  const a = new Int16Array(plain, 44, pcm.length);
+  const b = new Int16Array(withTx, 44, pcm.length);
+  assert.deepEqual([...b], [...a]);
+  const view = new DataView(withTx);
+  assert.equal(view.getUint32(4, true), withTx.byteLength - 8);
+  assert.equal(str(new DataView(withTx), 44 + pcm.length * 2, 4), "LIST");
+});
+
+test("a transcript chunk is padded to an even length and still reads back", () => {
+  // Odd payload lengths are the case the RIFF padding rule exists for.
+  for (const text of ["x", "xy", "xyz", "xyzw", "xyzwv"]) {
+    const buffer = encodeWavBuffer(new Float32Array([0]), 48000, { dither: false, transcript: text });
+    assert.equal(buffer.byteLength % 2, 0, `odd length for ${text}`);
+    assert.equal(readWavTranscript(buffer), text);
+  }
+});
+
+test("readWavTranscript ignores a foreign WAV and a non-WAV buffer", () => {
+  assert.equal(readWavTranscript(new Uint8Array([1, 2, 3]).buffer), "");
+  const plain = encodeWavBuffer(new Float32Array([0, 0.1]), 48000, { dither: false });
+  // Truncate mid-chunk: the walk must stop rather than read past the end.
+  assert.equal(readWavTranscript(plain.slice(0, 30)), "");
+});
+
+test("withoutTranscript strips the chunk and leaves an identical ordinary WAV", () => {
+  const pcm = new Float32Array([0, 0.5, -0.5, 0.25, 0.125, -0.75]);
+  const plain = encodeWavBuffer(pcm, 48000, { dither: false });
+  const withTx = encodeWavBuffer(pcm, 48000, { dither: false, transcript: "a transcript" });
+  const stripped = withoutTranscript(withTx);
+
+  assert.equal(stripped.byteLength, plain.byteLength);
+  assert.deepEqual([...new Uint8Array(stripped)], [...new Uint8Array(plain)]);
+  // A WAV with no extra chunk is returned untouched.
+  assert.equal(withoutTranscript(plain), plain);
+  assert.equal(withoutTranscript(new Uint8Array([1, 2, 3]).buffer).byteLength, 3);
 });
