@@ -22,7 +22,7 @@ import {
 import { CLICK_PX, SPEED_MAX, SPEED_MIN, clampSpeed, speedAfterDrag, speedFromDrag, stepSpeed } from "./ui/speed.js";
 import { zoomAnchor, zoomAround } from "./ui/view.js";
 import { peakOf } from "./audio/normalize.js";
-import { cleanUp, cleanupActive, cleanupOptions, cleanupSummary, LIMIT_CEILING_DB, RUMBLE_CUTOFF_HZ, LEVEL_MAX_BOOST_DB, LEVEL_WINDOW_S } from "./audio/enhance.js";
+import { cleanUp, cleanupActive, cleanupOptions, cleanupRanges, cleanupSummary, LIMIT_CEILING_DB, RUMBLE_CUTOFF_HZ, LEVEL_MAX_BOOST_DB, LEVEL_WINDOW_S } from "./audio/enhance.js";
 
 const $ = (id) => document.getElementById(id);
 
@@ -49,8 +49,10 @@ const state = {
   // rather than the cleaned audio. Int16 is half an f32 copy and its -96 dBFS
   // quantization sits far below any recording's own noise floor.
   original: null,
-  // The clean-up options currently applied to the working copy, or null.
-  cleanupOptions: null,
+  // The clean-up currently applied to the working copy, as
+  // `{ options, scope }`, or null. `scope` is "full", "clips" (each clip on its
+  // own) or a clip index as a string.
+  cleanup: null,
   // A recording's pristine audio is already persisted chunk by chunk, so its
   // autosave must not replace those chunks with a snapshot of an edit.
   keepChunks: false,
@@ -164,6 +166,7 @@ const waveform = new WaveformView({
     renderClipList();
     updateSplitLabels();
     renderTranscriptScopes();
+    renderCleanupScopes();
   },
   onViewChange: () => {},
 });
@@ -358,7 +361,7 @@ async function persistAutosave() {
     const meta = {
       name: state.sourceName || "recording",
       sampleRate: state.sampleRate,
-      cleanup: state.cleanupOptions || null,
+      cleanup: state.cleanup || null,
     };
     if (state.keepChunks) {
       await createSession(state.sessionId, { ...meta, type: "audio/webm", live: true });
@@ -412,7 +415,7 @@ function setSource(pcm, sampleRate, label, { autosave = true, saved = false, ses
   // The pristine copy every clean-up renders from, and the options applied to
   // the working copy (none, for a fresh source).
   state.original = toInt16(pcm);
-  state.cleanupOptions = null;
+  state.cleanup = null;
   state.keepChunks = keepChunks;
   autosaveSnapshotDone = false;
   // A new source invalidates the edit history.
@@ -512,12 +515,23 @@ async function requestDeviceAccess() {
   }
 }
 
-$("refreshDevices").addEventListener("click", async () => {
+$("deviceBtn").addEventListener("click", async () => {
+  const row = $("deviceRow");
+  const open = row.hidden;
+  row.hidden = !open;
+  const btn = $("deviceBtn");
+  btn.setAttribute("aria-expanded", open ? "true" : "false");
+  btn.setAttribute("aria-pressed", open ? "true" : "false");
+  if (!open) return;
+  // Device names and ids stay hidden until the page has microphone permission,
+  // so opening the panel is what asks for it.
+  $("deviceStatus").textContent = "Checking devices…";
   if (!(await requestDeviceAccess())) {
-    alert("Microphone permission is needed before the browser will list audio devices.");
+    $("deviceStatus").textContent = "Microphone permission is needed before device names are shown.";
     return;
   }
   await refreshDevices();
+  $("deviceStatus").textContent = "";
 });
 $("devInput").addEventListener("change", (e) => {
   state.inputDeviceId = e.target.value || null;
@@ -706,17 +720,9 @@ $("stopRecBtn").addEventListener("click", async () => {
 });
 
 // ── Load file ─────────────────────────────────────────────────────────────────
-$("fileInput").addEventListener("change", async (e) => {
-  const file = e.target.files[0];
-  if (!file) return;
-  if (transcribing) {
-    e.target.value = "";
-    return;
-  }
-  if (!confirmIfUnsaved()) {
-    e.target.value = "";
-    return;
-  }
+/** Decode `file` and make it the source. Returns false when it was refused. */
+async function loadAudioFile(file) {
+  if (transcribing) return false;
   // REC-10: decoding expands the whole file to 32-bit float (an hour of stereo
   // is about 1.4 GB before the mono mixdown). Warn before a big one, and give a
   // clear message if it fails rather than a bare browser error.
@@ -725,10 +731,7 @@ $("fileInput").addEventListener("change", async (e) => {
       `This file is ${(file.size / 1048576).toFixed(0)} MB. Decoding expands it to 32-bit float in memory ` +
         `(several times the file size), and a very long file can fail. Continue?`
     );
-    if (!ok) {
-      e.target.value = "";
-      return;
-    }
+    if (!ok) return false;
   }
   try {
     await withBusy(`Loading ${file.name}…`, async () => {
@@ -739,9 +742,85 @@ $("fileInput").addEventListener("change", async (e) => {
   } catch (err) {
     const detail = err && err.message ? err.message : String(err);
     alert(`Could not decode file: ${detail}\n\nVery long files can run out of memory while decoding.`);
+    return false;
   }
-  // Clear the input so choosing the same file again still fires a change event.
+  return true;
+}
+
+/** True when it is an audio or video file the decoder can try. */
+function looksLikeAudio(file) {
+  if (file.type) return /^(audio|video)\//.test(file.type);
+  return /\.(wav|mp3|m4a|aac|ogg|oga|opus|webm|flac|mp4|mov|aiff?|wma)$/i.test(file.name || "");
+}
+
+$("fileInput").addEventListener("change", async (e) => {
+  const file = e.target.files[0];
+  // Clear the input first, so choosing the same file again still fires a change.
   e.target.value = "";
+  if (!file) return;
+  if (!confirmIfUnsaved()) return;
+  await loadAudioFile(file);
+});
+
+// ── Drag and drop a file onto the page ───────────────────────────────────────
+// dragenter/dragleave fire for every element the pointer crosses, so the overlay
+// is tracked with a depth counter rather than a boolean.
+let dragDepth = 0;
+
+function dragHasFiles(e) {
+  const types = e.dataTransfer && e.dataTransfer.types;
+  return !!types && [...types].includes("Files");
+}
+
+function setDropOverlay(on) {
+  const overlay = $("dropOverlay");
+  if (overlay) overlay.hidden = !on;
+}
+
+window.addEventListener("dragenter", (e) => {
+  if (!dragHasFiles(e)) return;
+  e.preventDefault();
+  dragDepth += 1;
+  setDropOverlay(true);
+});
+
+window.addEventListener("dragover", (e) => {
+  if (!dragHasFiles(e)) return;
+  // Without this the browser navigates to the dropped file.
+  e.preventDefault();
+  if (e.dataTransfer) e.dataTransfer.dropEffect = "copy";
+});
+
+window.addEventListener("dragleave", (e) => {
+  if (!dragHasFiles(e)) return;
+  dragDepth = Math.max(0, dragDepth - 1);
+  if (dragDepth === 0) setDropOverlay(false);
+});
+
+window.addEventListener("drop", async (e) => {
+  if (!dragHasFiles(e)) return;
+  e.preventDefault();
+  dragDepth = 0;
+  setDropOverlay(false);
+  const file = e.dataTransfer && e.dataTransfer.files && e.dataTransfer.files[0];
+  if (!file) return;
+  if (!looksLikeAudio(file)) {
+    alert(`"${file.name}" is not an audio file.`);
+    return;
+  }
+  if (recorder.status() !== "idle") {
+    alert("Stop the recording before loading a file.");
+    return;
+  }
+  if (state.pcm) {
+    // Anything already loaded or recorded would be replaced, so ask first --
+    // whether or not it has been exported.
+    const unsaved = state.saved ? "" : " It has not been exported, so save a backup first if you need it.";
+    if (!confirm(`"${state.sourceName}" is already loaded. Replace it with "${file.name}"?${unsaved}`)) {
+      return;
+    }
+  }
+  await loadAudioFile(file);
 });
 
 // ── Waveform tools ──────────────────────────────────────────────────────────
@@ -848,30 +927,68 @@ function applySplits(splits, message) {
 
 /**
  * Render the pristine source through the clean-up chain, or hand back a fresh
- * copy of it when `options` is null (no clean-up).
+ * copy of it when `cleanup` is null (no clean-up).
+ *
+ * `cleanup.scope` decides what "the recording" means for the stages: the whole
+ * file at once, or each clip on its own. Per clip, every stage measures and acts
+ * on that clip alone -- normalize over clip 1, then clip 2, and so on -- which is
+ * what a clip exported on its own needs.
  */
-async function renderCleanup(options) {
+async function renderCleanup(cleanup) {
   const source = pristinePcm();
   if (!source) return null;
-  if (!options) return { pcm: source, steps: [] };
-  // `source` was allocated for this render, so the chain can work on it directly.
-  const { pcm, steps } = await cleanUp(
-    source,
-    state.sampleRate,
-    options,
-    (f) => {
-      $("busyText").textContent = `Denoising… ${Math.round(f * 100)}%`;
-    },
-    { copy: false }
-  );
-  return { pcm, steps };
+  if (!cleanup) return { pcm: source, steps: [] };
+  const ranges = cleanupScopeRanges(cleanup.scope, source.length);
+  if (ranges.length === 1) {
+    // `source` was allocated for this render, so the chain can work on it directly.
+    const { pcm, steps } = await cleanUp(
+      source,
+      state.sampleRate,
+      cleanup.options,
+      (f) => {
+        $("busyText").textContent = `Denoising… ${Math.round(f * 100)}%`;
+      },
+      { copy: false }
+    );
+    return { pcm, steps };
+  }
+  const out = new Float32Array(source.length);
+  let steps = [];
+  for (const [index, range] of ranges.entries()) {
+    const part = source.slice(range.start, range.end);
+    const rendered = await cleanUp(
+      part,
+      state.sampleRate,
+      cleanup.options,
+      (f) => {
+        $("busyText").textContent =
+          `Cleaning clip ${index + 1} of ${ranges.length}… ${Math.round(f * 100)}%`;
+      },
+      { copy: false }
+    );
+    out.set(rendered.pcm, range.start);
+    if (rendered.steps.length) steps = rendered.steps;
+  }
+  return { pcm: out, steps, perClip: ranges.length };
 }
 
-/** Apply a clean-up option set (or none) to the working copy. */
-async function applyCleanup(options, message) {
-  const rendered = await renderCleanup(options);
+/** Sample ranges a clean-up scope covers, from the current splits. */
+function cleanupScopeRanges(scope, length) {
+  return cleanupRanges(scope, state.pcm ? buildClips(state.splits, length) : [], length);
+}
+
+/** The scope label for a message. */
+function cleanupScopeLabel(scope) {
+  if (scope === "clips") return "each clip";
+  const index = Number.parseInt(scope, 10);
+  return Number.isInteger(index) ? `clip ${index + 1}` : "the whole file";
+}
+
+/** Apply a clean-up (or none) to the working copy. */
+async function applyCleanup(cleanup, message) {
+  const rendered = await renderCleanup(cleanup);
   if (!rendered) return;
-  state.cleanupOptions = options;
+  state.cleanup = cleanup;
   await swapSource(rendered.pcm, message);
 }
 
@@ -1000,8 +1117,47 @@ function showCleanOptions(open) {
 }
 
 // The clean-up button opens the options; the panel's own button runs them.
-$("cleanUpBtn").addEventListener("click", () => showCleanOptions($("cleanOptions").hidden));
+$("cleanUpBtn").addEventListener("click", () => {
+  if ($("cleanOptions").hidden) renderCleanupScopes();
+  showCleanOptions($("cleanOptions").hidden);
+});
 $("cleanClose").addEventListener("click", () => showCleanOptions(false));
+
+/**
+ * The clean-up scope select: only offered when the recording has splits, and
+ * always reset to "full" when there are none, so a stale clip choice cannot
+ * silently apply to the wrong range.
+ */
+function renderCleanupScopes() {
+  const sel = $("cleanScope");
+  const previous = sel.value;
+  sel.innerHTML = "";
+  const add = (value, text) => {
+    const option = document.createElement("option");
+    option.value = value;
+    option.textContent = text;
+    sel.appendChild(option);
+  };
+  add("full", "full file");
+  const clips = state.pcm ? buildClips(state.splits, state.pcm.length) : [];
+  $("cleanScopeLabel").hidden = clips.length === 0;
+  if (!clips.length) {
+    sel.value = "full";
+    return;
+  }
+  add("clips", "each clip");
+  clips.forEach((clip, i) => {
+    add(String(i), `clip ${String(i + 1).padStart(2, "0")} (${fmtShort(clip.start)}-${fmtShort(clip.end)})`);
+  });
+  sel.value = [...sel.options].some((option) => option.value === previous) ? previous : "full";
+}
+
+/** The selected clean-up scope. */
+function cleanupScopeValue() {
+  const sel = $("cleanScope");
+  if (!sel || $("cleanScopeLabel").hidden) return "full";
+  return sel.value || "full";
+}
 
 $("cleanConsonantDb").addEventListener("input", () => {
   $("cleanConsonantVal").textContent = `${$("cleanConsonantDb").value} dB`;
@@ -1021,16 +1177,22 @@ $("cleanRun").addEventListener("click", async () => {
     $("saveStatus").textContent = cleanupSummary([]);
     return;
   }
+  const scope = cleanupScopeValue();
   historyBusy = true;
   try {
     await withBusy("Cleaning up…", async () => {
       // Always rendered from the pristine source, so running clean-up again
       // replaces the previous result instead of stacking on top of it.
-      const rendered = await renderCleanup(opts);
+      const rendered = await renderCleanup({ options: opts, scope });
       if (!rendered) return;
-      pushHistory({ kind: "cleanup", before: state.cleanupOptions, after: opts });
-      state.cleanupOptions = opts;
-      await swapSource(rendered.pcm, cleanupSummary(rendered.steps));
+      pushHistory({
+        kind: "cleanup",
+        before: state.cleanup,
+        after: { options: opts, scope },
+      });
+      state.cleanup = { options: opts, scope };
+      const scopeNote = scope === "full" ? "" : ` (${cleanupScopeLabel(scope)})`;
+      await swapSource(rendered.pcm, cleanupSummary(rendered.steps) + scopeNote);
       // Done: put the options away.
       showCleanOptions(false);
     });
@@ -1377,7 +1539,7 @@ function transcriptionScope() {
  */
 function transcriptionInput(scope) {
   const out = new Float32Array(scope.pcm.length);
-  const useCleaned = $("txCleaned").checked && state.cleanupOptions;
+  const useCleaned = $("txCleaned").checked && state.cleanup;
   if (!state.original || useCleaned) {
     out.set(scope.pcm);
   } else {
@@ -1900,10 +2062,17 @@ window.addEventListener("beforeunload", (e) => {
               });
               // The stored audio is the pristine source, so a clean-up that was
               // applied when it was saved is reproduced rather than stored.
-              if (loaded.meta.cleanup) {
-                const rendered = await renderCleanup(loaded.meta.cleanup);
+              // Older sessions stored bare options; those mean the whole file.
+              const stored = loaded.meta.cleanup;
+              const cleanup = stored
+                ? stored.options
+                  ? stored
+                  : { options: stored, scope: "full" }
+                : null;
+              if (cleanup) {
+                const rendered = await renderCleanup(cleanup);
                 if (rendered) {
-                  state.cleanupOptions = loaded.meta.cleanup;
+                  state.cleanup = cleanup;
                   await swapSource(rendered.pcm, "Recovered with clean up");
                 }
               }

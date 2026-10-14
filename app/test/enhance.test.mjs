@@ -9,6 +9,7 @@ import {
   cleanUp,
   cleanupActive,
   cleanupOptions,
+  cleanupRanges,
   cleanupSummary,
   isGainOnlyCleanup,
   LIMIT_CEILING_DB,
@@ -157,6 +158,58 @@ test("isGainOnlyCleanup matches the single-multiplier undo rule", () => {
   assert.equal(isGainOnlyCleanup({ ...only, rumble: true }), false);
   // A selected consonant stage means the chain is not one multiplier, even at 0 dB.
   assert.equal(isGainOnlyCleanup({ ...only, consonant: true, consonantDb: 0 }), false);
+});
+
+test("cleanupRanges maps a scope onto sample ranges", () => {
+  const clips = [
+    { start: 0, end: 1000 },
+    { start: 1000, end: 2500 },
+    { start: 2500, end: 4000 },
+  ];
+  assert.deepEqual(cleanupRanges("full", clips, 4000), [{ start: 0, end: 4000 }]);
+  assert.deepEqual(cleanupRanges(null, clips, 4000), [{ start: 0, end: 4000 }]);
+  assert.deepEqual(cleanupRanges("clips", clips, 4000), clips);
+  assert.deepEqual(cleanupRanges("1", clips, 4000), [{ start: 1000, end: 2500 }]);
+  // A stale clip choice, or one made before any split existed, covers the whole
+  // recording rather than the wrong range.
+  assert.deepEqual(cleanupRanges("9", clips, 4000), [{ start: 0, end: 4000 }]);
+  assert.deepEqual(cleanupRanges("clips", [], 4000), [{ start: 0, end: 4000 }]);
+  assert.deepEqual(cleanupRanges("2", undefined, 4000), [{ start: 0, end: 4000 }]);
+});
+
+test("a per-clip run measures each clip on its own", async () => {
+  const loud = tone(300, 0.5, 48000, 0.5);
+  const quiet = tone(300, 0.5, 48000, 0.05);
+  const opts = {
+    rumble: false,
+    denoise: false,
+    consonant: false,
+    normalize: true,
+    normalizeMode: "peak",
+    loudness: false,
+  };
+  const peak = (a) => a.reduce((m, v) => Math.max(m, Math.abs(v)), 0);
+
+  const whole = new Float32Array(loud.length * 2);
+  whole.set(loud, 0);
+  whole.set(quiet, loud.length);
+  const together = await cleanUp(whole, 48000, opts);
+  // One gain from the loud clip barely moves the quiet clip: it ends far below
+  // the target, which is what a clip exported on its own would inherit.
+  const quietInWhole = peak(together.pcm.subarray(loud.length));
+  assert.ok(
+    quietInWhole < NORM_PEAK * 0.2,
+    `whole-file left the quiet clip at ${quietInWhole}, target ${NORM_PEAK}`
+  );
+
+  // Per clip, each reaches the target on its own.
+  const perClip = [];
+  for (const part of [loud, quiet]) {
+    const { pcm } = await cleanUp(Float32Array.from(part), 48000, opts);
+    perClip.push(peak(pcm));
+  }
+  assert.ok(Math.abs(perClip[0] - NORM_PEAK) < 1e-3, `loud clip peak ${perClip[0]}`);
+  assert.ok(Math.abs(perClip[1] - NORM_PEAK) < 1e-3, `quiet clip peak ${perClip[1]}`);
 });
 
 test("cleanUp never mutates the caller's buffer", async () => {

@@ -96,6 +96,29 @@ main { max-width: 960px; margin: 0 auto; padding: 0.8rem 1rem 1.4rem; display: f
 .meter { height: 3px; background: var(--line); border-radius: 2px; overflow: hidden; margin-top: 0.45rem; }
 .meter > div { height: 100%; width: 0%; background: linear-gradient(90deg, var(--accent), var(--accent2)); transition: width .08s; }
 
+/* Device settings: a second row, revealed by its toggle. */
+.device-row { border-top: 1px dashed var(--line); padding-top: 0.35rem; }
+
+/* Whole-page drop target for loading an audio file. */
+.drop-overlay {
+  position: fixed;
+  inset: 0;
+  z-index: 60;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  background: rgba(9, 12, 18, 0.72);
+  pointer-events: none;
+}
+.drop-overlay .drop-box {
+  border: 2px dashed var(--accent);
+  border-radius: 14px;
+  padding: 2.2rem 3rem;
+  font-size: 1.05rem;
+  color: var(--ink);
+  background: rgba(20, 26, 36, 0.9);
+}
+
 .wave-shell { border: 1px solid var(--line); border-radius: 10px; overflow: hidden; background: #0c0f16; }
 #overview { display: block; width: 100%; cursor: pointer; background: #0a0d13; border-bottom: 1px solid var(--line); }
 .wave-main { position: relative; }

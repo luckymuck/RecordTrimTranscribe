@@ -21,8 +21,11 @@ build the [portable desktop app](#portable) to use it with no network at all.
 
 ## Recording
 
-- **Devices** — use **List devices** to grant microphone permission when labels
-  are unavailable (browsers hide device identities until permission is granted).
+- **Devices** — **device settings** reveals the input and output pickers and asks
+  for microphone permission, which browsers require before they will show device
+  names. The pickers stay out of the way until the button is switched on.
+- **Drag and drop** — drop an audio file anywhere on the page to load it. If
+  something is already loaded or recorded, the drop asks before replacing it.
 - **Recorded files** — the current clip is **autosaved to IndexedDB**; after any
   browser close you are offered the previous session's recording on next launch.
   Closing or leaving the page (Back, refresh) triggers a browser warning while an
@@ -81,6 +84,11 @@ build the [portable desktop app](#portable) to use it with no network at all.
   - **limit peaks** — a −1 dBFS lookahead limiter. It also runs automatically
     whenever a stage raised the level, and on any export whose peak would run
     over the ceiling, so cleaned audio cannot clip.
+  - **apply to** — when the recording has splits, the clean-up can be applied to
+    the whole file at once, to **each clip** on its own, or to one named clip.
+    Per clip, every stage measures and acts on that clip alone — normalize over
+    clip 1, then clip 2, and so on — which is what a clip exported on its own
+    needs.
 
 ## Export
 
@@ -239,11 +247,12 @@ cargo test            # 77 tests: timing, pitch, PSOLA, WSOLA, streaming, rate,
 node dsp_smoke.mjs    # WASM bindings end-to-end (needs: npx wasm-pack build --target nodejs)
 
 cd ..
-node --test app/test/*.test.mjs   # 75 JS unit tests: transcript formatting,
+node --test app/test/*.test.mjs   # 77 JS unit tests: transcript formatting,
                                   # filenames, split boundaries, dial and zoom
                                   # arithmetic, WAV encoding, speech-active
-                                  # normalization, the clean-up chain and RNNoise,
-                                  # transcript follow/marker helpers
+                                  # normalization, clean-up scopes, the clean-up
+                                  # chain and RNNoise, transcript follow/marker
+                                  # helpers
 ```
 
 CI runs both suites (`.github/workflows/core-tests.yml`, `web-tests.yml`) plus a

@@ -33,17 +33,21 @@
       <button id="stopRecBtn" class="btn" disabled>■ Stop</button>
       <span class="rec-time" id="recTime">00:00</span>
       <span class="sep"></span>
+      <label class="btn file" id="loadLabel">Load audio<input type="file" id="fileInput" accept="audio/*,video/*" hidden></label>
+      <button class="btn sm toggle" id="deviceBtn" aria-expanded="false" aria-pressed="false"
+        title="Choose the microphone and speaker. The browser hides device names until it has microphone permission, so switching this on asks for it.">device settings</button>
+    </div>
+    <div class="row device-row" id="deviceRow" hidden>
       <label class="chk">Input
         <select id="devInput" title="Microphone for recording"><option value="">Default</option></select>
       </label>
       <label class="chk">Output
         <select id="devOutput" title="Speaker for playback"><option value="">Default</option></select>
       </label>
-      <button class="btn sm" id="refreshDevices" title="Request permission if needed, then relist audio devices">List devices</button>
-      <span class="sep"></span>
       <label class="chk" title="Use the browser's echo cancellation / noise suppression / auto gain. Off by default: they clip quiet word onsets and pump the noise floor."><input type="checkbox" id="voiceProc"> voice processing</label>
-      <span class="sep"></span>
-      <label class="btn file" id="loadLabel">Load audio<input type="file" id="fileInput" accept="audio/*,video/*" hidden></label>
+      <span class="muted" id="deviceStatus"></span>
+    </div>
+    <div class="row">
       <span class="muted" id="fileMeta">No audio loaded</span>
       <span class="sep"></span>
       <button class="btn sm" id="saveBackup" title="Export this recording as WAV so you keep a copy">⬇ Save backup</button>
@@ -91,7 +95,7 @@
         <span class="muted" id="cleanConsonantVal">3 dB</span>
       </label>
       <label class="chk" title="Bring quiet passages up toward the loud ones (up to 12 dB over a 3 s window), so a speaker further from the microphone is heard at about the same level. Pauses are left alone, so skip silence still works."><input type="checkbox" id="cleanLevel"> level voices</label>
-      <label class="chk" title="Set the recording's level: peak scales the loudest sample to −1 dBFS; rms scales so the average level hits −20 dBFS, keeping the peak under −1 dBFS."><input type="checkbox" id="cleanNormalize"> normalize</label>
+      <label class="chk" title="Set the recording's level: peak scales the loudest sample to −1 dBFS; rms raises the speech-active level to −20 dBFS. The limiter handles peaks."><input type="checkbox" id="cleanNormalize"> normalize</label>
       <label class="chk">mode
         <select id="normMode" class="sm-select" aria-label="Normalize mode">
           <option value="peak" selected>peak</option>
@@ -99,6 +103,12 @@
         </select>
       </label>
       <label class="chk" title="Peak limiter at −1 dBFS so nothing clips after processing"><input type="checkbox" id="cleanLoudness"> limit peaks</label>
+      <label class="chk" id="cleanScopeLabel" hidden title="Apply the clean-up to the whole recording at once, to each clip on its own, or to one clip. Per clip, each stage measures and acts on that clip alone — normalize over clip 1, then clip 2, and so on.">apply to
+        <select id="cleanScope" class="sm-select" aria-label="Clean-up scope">
+          <option value="full" selected>full file</option>
+          <option value="clips">each clip</option>
+        </select>
+      </label>
       <button class="btn sm" id="cleanRun">Run clean-up</button>
       <button class="btn sm" id="cleanClose">Close</button>
     </div>
@@ -171,6 +181,10 @@
     </div>
   </section>
 </main>
+
+<div id="dropOverlay" class="drop-overlay" hidden>
+  <div class="drop-box">Drop an audio file to load it</div>
+</div>
 
 <div id="recoverBanner" class="banner" style="display:none">
   <span>You have an unsaved recording from a previous session.</span>

@@ -65,6 +65,25 @@ export function cleanupRaisesLevel(partial) {
   return o.level || (o.consonant && o.consonantDb > 0) || (o.normalize && o.normalizeMode === "rms");
 }
 
+/**
+ * Sample ranges a clean-up scope covers. `clips` is the list from `buildClips`.
+ *
+ * A scope naming a clip that no longer exists falls back to the whole recording
+ * rather than to the wrong range: splits move, and a stale choice must not
+ * silently clean a different part of the file.
+ */
+export function cleanupRanges(scope, clips, length) {
+  const whole = [{ start: 0, end: length }];
+  if (!scope || scope === "full") return whole;
+  const list = Array.isArray(clips) ? clips : [];
+  if (scope === "clips") {
+    return list.length ? list.map((c) => ({ start: c.start, end: c.end })) : whole;
+  }
+  const index = Number.parseInt(scope, 10);
+  const clip = Number.isInteger(index) ? list[index] : null;
+  return clip ? [{ start: clip.start, end: clip.end }] : whole;
+}
+
 /** Human-readable summary of what a run did. */
 export function cleanupSummary(steps) {
   return steps && steps.length ? `Cleaned up: ${steps.join(", ")}` : "Nothing selected to clean up";
