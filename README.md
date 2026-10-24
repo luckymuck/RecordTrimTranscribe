@@ -27,7 +27,13 @@ build the [portable desktop app](#portable) to use it with no network at all.
 - **Drag and drop** — drop an audio file anywhere on the page to load it. If
   something is already loaded or recorded, the drop asks before replacing it.
 - **Recorded files** — the current clip is **autosaved to IndexedDB**; after any
-  browser close you are offered the previous session's recording on next launch.
+  browser close a **recovery panel** lists everything saved on the device, each
+  entry showing its name (the file's name, or the tentative `MMDDYYYY HHMM` of a
+  recording), when it was last saved, its length and whether it was an
+  interrupted recording. Load or discard each one, keep them for later, or
+  discard all. Sessions older than seven days are removed automatically. Several
+  browser tabs can be open at once: each writes its own session, so they never
+  overwrite each other, and recovering one moves it to that tab's own record.
   Closing or leaving the page (Back, refresh) triggers a browser warning while an
   unsaved clip is loaded.
 
@@ -113,6 +119,12 @@ timestamp, so the word timings stay valid either way.
 **Follow audio** (on by default) highlights the line being played and scrolls it
 to sit four lines from the top, so you can read along with what was just said and
 what is coming. The toggle is beside the Transcribe button.
+
+**Focus** in the transcript header gives the transcript the page: the source and
+export cards and the page header step out of the way, while the waveform and
+transport stay so playback and follow-along still work. **Esc**, or the same
+button, returns. The transcript box also has a drag handle for its height, and
+the followed line is re-anchored after any resize.
 
 **Reopening without re-transcribing.** Transcripts export as `.txt`, `.srt`,
 `.vtt` and `.json`, named after the source so `<base>.srt` sits beside
@@ -261,13 +273,13 @@ cargo test            # 77 tests: timing, pitch, PSOLA, WSOLA, streaming, rate,
 node dsp_smoke.mjs    # WASM bindings end-to-end (needs: npx wasm-pack build --target nodejs)
 
 cd ..
-node --test app/test/*.test.mjs   # 89 JS unit tests: transcript formatting and
+node --test app/test/*.test.mjs   # 92 JS unit tests: transcript formatting and
                                   # parsing (SRT/VTT/JSON), filenames, split
                                   # boundaries, dial and zoom arithmetic, WAV
                                   # encoding and the embedded transcript,
                                   # speech-active normalization, clean-up scopes,
                                   # the clean-up chain and RNNoise, transcript
-                                  # follow/marker helpers
+                                  # follow/marker helpers, recovery labels
 ```
 
 CI runs both suites (`.github/workflows/core-tests.yml`, `web-tests.yml`) plus a

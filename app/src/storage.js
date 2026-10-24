@@ -127,12 +127,27 @@ export async function createSession(id, meta) {
   await write(db, (s) => s.put({ ...meta, id, savedAt: Date.now() }, metaKey(id)));
 }
 
-/** Append one captured chunk. `arrayBuffer` avoids the Safari Blob pitfall. */
+/**
+ * Append one captured chunk. `arrayBuffer` avoids the Safari Blob pitfall.
+ *
+ * The metadata is merged, never replaced: the name, type and duration written at
+ * recording start are what make a recovery identifiable, and the first version of
+ * this overwrote them with `{id, savedAt}`, so every interrupted recording came
+ * back nameless.
+ */
 export async function appendChunk(id, index, arrayBuffer) {
   const db = await openDB();
+  const key = metaKey(id);
   await write(db, (s) => {
     s.put(arrayBuffer, chunkKey(id, index));
-    s.put({ id, savedAt: Date.now() }, metaKey(id));
+    const rq = s.get(key);
+    rq.onsuccess = () => {
+      const meta = rq.result || { id };
+      s.put(
+        { ...meta, id, chunks: (Number(meta.chunks) || 0) + 1, savedAt: Date.now() },
+        key
+      );
+    };
   });
 }
 
@@ -142,7 +157,7 @@ export async function replaceSnapshot(id, meta, arrayBuffer) {
   await write(db, (s) => {
     s.delete(chunkRange(id));
     s.put(arrayBuffer, chunkKey(id, 0));
-    s.put({ ...meta, id, savedAt: Date.now() }, metaKey(id));
+    s.put({ ...meta, id, chunks: 1, savedAt: Date.now() }, metaKey(id));
   });
 }
 
@@ -151,6 +166,27 @@ export async function listSessions() {
   const db = await openDB();
   const metas = await read(db, (s) => s.getAll(metaRange()));
   return (metas || []).sort((a, b) => (b.savedAt || 0) - (a.savedAt || 0));
+}
+
+/**
+ * Delete sessions last saved longer ago than `maxAgeMs`. Returns how many were
+ * removed. A session old enough to prune is one the recovery panel has been
+ * offering for days, not something a live tab is writing.
+ */
+export async function pruneSessions(maxAgeMs) {
+  const cutoff = Date.now() - maxAgeMs;
+  const sessions = await listSessions();
+  let removed = 0;
+  for (const meta of sessions) {
+    if ((meta.savedAt || 0) >= cutoff) continue;
+    try {
+      await deleteSession(meta.id);
+      removed += 1;
+    } catch (e) {
+      /* keep going: one unreadable record should not stop the sweep */
+    }
+  }
+  return removed;
 }
 
 /** Load one session as `{ meta, blob }`, or null. */

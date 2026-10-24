@@ -81,6 +81,8 @@ main { max-width: 960px; margin: 0 auto; padding: 0.8rem 1rem 1.4rem; display: f
 .btn.sm { padding: 0.28rem 0.5rem; font-size: 0.78rem; }
 .btn.primary { background: var(--accent); color: #06221d; border-color: var(--accent); font-weight: 600; }
 .btn.primary:hover { color: #06221d; filter: brightness(1.08); }
+.btn.danger { color: var(--rec); border-color: rgba(255, 92, 108, 0.45); }
+.btn.danger:hover { background: rgba(255, 92, 108, 0.12); }
 .btn.toggle[aria-pressed="true"] {
   background: var(--accent); color: #06221d; border-color: var(--accent);
   border-style: solid; font-weight: 600;
@@ -169,7 +171,7 @@ select { background: var(--card2); color: var(--ink); border: 1px solid var(--li
 .progress { height: 3px; background: var(--line); border-radius: 2px; overflow: hidden; margin-top: 0.45rem; }
 .progress > div { height: 100%; width: 0%; background: var(--accent); transition: width .2s; }
 
-.transcript { margin-top: 0.55rem; max-height: 440px; overflow: auto; border-top: 1px solid var(--line); padding-top: 0.45rem; }
+.transcript { margin-top: 0.55rem; max-height: 70vh; overflow: auto; border-top: 1px solid var(--line); padding-top: 0.45rem; resize: vertical; min-height: 120px; }
 .seg { padding: 0.22rem 0.4rem; border-radius: 6px; cursor: pointer; display: flex; gap: 0.55rem; }
 .seg:hover { background: var(--card2); }
 .seg .t { color: var(--accent); font-variant-numeric: tabular-nums; flex-shrink: 0; font-size: 0.72rem; padding-top: 0.05rem; }
@@ -232,6 +234,57 @@ select { background: var(--card2); color: var(--ink); border: 1px solid var(--li
 .ctxmenu button.danger:hover { background: rgba(255, 92, 108, 0.12); }
 
 /* Recovery banner (floats on top) */
+/* Recovery panel: everything autosaved on this device, so the work is
+   identifiable before it is loaded or discarded. */
+.recover-panel {
+  position: fixed;
+  inset: 0;
+  z-index: 1300;
+  display: flex;
+  align-items: flex-start;
+  justify-content: center;
+  padding: 8vh 1rem 1rem;
+  background: rgba(9, 12, 18, 0.72);
+}
+.recover-panel[hidden] { display: none; }
+.recover-box {
+  width: min(620px, 96vw);
+  max-height: 80vh;
+  overflow: auto;
+  background: #241b10;
+  border: 1px solid rgba(255, 180, 84, 0.55);
+  border-radius: 12px;
+  padding: 0.9rem 1rem 1rem;
+  box-shadow: 0 16px 48px rgba(0, 0, 0, 0.65);
+}
+.recover-box h3 { margin: 0 0 0.35rem; font-size: 0.98rem; }
+.recover-box p { margin: 0 0 0.6rem; font-size: 0.82rem; }
+.recover-list { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; gap: 0.4rem; }
+.recover-item {
+  display: flex;
+  align-items: center;
+  gap: 0.6rem;
+  flex-wrap: wrap;
+  padding: 0.5rem 0.6rem;
+  border: 1px solid var(--line);
+  border-radius: 9px;
+  background: rgba(0, 0, 0, 0.18);
+}
+.recover-meta { display: flex; flex-direction: column; gap: 0.1rem; min-width: 0; flex: 1 1 16rem; }
+.recover-name { font-size: 0.88rem; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.recover-item .muted { font-size: 0.76rem; }
+.recover-empty { font-size: 0.85rem; color: var(--muted); }
+
+/* Transcript focus: the transcript takes the page, but the waveform and
+   transport stay so playback and follow-along still work. */
+body.tx-focus { overflow: hidden; }
+body.tx-focus > header { display: none; }
+body.tx-focus main { max-width: none; height: 100vh; padding-top: 0.5rem; }
+body.tx-focus #sourceCard,
+body.tx-focus #exportCard { display: none; }
+body.tx-focus #txCard { flex: 1 1 auto; display: flex; flex-direction: column; min-height: 0; }
+body.tx-focus #transcript { flex: 1 1 auto; min-height: 0; max-height: none; resize: none; }
+
 .banner {
   position: fixed; top: 12px; left: 50%; transform: translateX(-50%); z-index: 1300;
   display: flex; align-items: center; gap: 0.8rem;

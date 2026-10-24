@@ -26,7 +26,7 @@
 
 <main>
   <!-- 1. Source -->
-  <section class="card">
+  <section class="card" id="sourceCard">
     <h2><span class="badge">1</span> Record or Load</h2>
     <div class="row">
       <button id="recordBtn" class="btn rec">● Record</button>
@@ -136,7 +136,10 @@
 
   <!-- 4. Transcript -->
   <section class="card" id="txCard" aria-disabled="true">
-    <h2><span class="badge">4</span> Transcript</h2>
+    <h2><span class="badge">4</span> Transcript
+      <button class="btn sm toggle" id="txFocus" aria-pressed="false" style="margin-left:auto"
+        title="Give the transcript the page: hides the other cards but keeps the waveform and transport, so you can still play and follow. Esc leaves.">focus</button>
+    </h2>
     <div class="row">
       <button id="transcribeBtn" class="btn">Transcribe (Whisper)</button>
       <button id="cancelTx" class="btn" style="display:none" title="Stop after the current window">Cancel</button>
@@ -189,10 +192,16 @@
   <div class="drop-box">Drop an audio file to load it</div>
 </div>
 
-<div id="recoverBanner" class="banner" style="display:none">
-  <span>You have an unsaved recording from a previous session.</span>
-  <button class="btn sm primary" id="recoverYes">Load it</button>
-  <button class="btn sm" id="recoverNo">Discard</button>
+<div id="recoverPanel" class="recover-panel" role="dialog" aria-modal="true" aria-labelledby="recoverTitle" hidden>
+  <div class="recover-box">
+    <h3 id="recoverTitle">Unsaved work from a previous session</h3>
+    <p class="muted" id="recoverNote">Kept on this device only. Load one to continue where it left off, or discard what you no longer need.</p>
+    <ul id="recoverList" class="recover-list"></ul>
+    <div class="row">
+      <button class="btn sm" id="recoverKeep">Keep for later</button>
+      <button class="btn sm danger" id="recoverDiscardAll">Discard all</button>
+    </div>
+  </div>
 </div>
 
 <div id="busy" class="busy" role="status" aria-live="polite">

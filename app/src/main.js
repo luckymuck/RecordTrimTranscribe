@@ -4,7 +4,7 @@ import { decodeAudioBlob, audioContext } from "./audio/decode.js";
 import { Recorder } from "./audio/record.js";
 import { encodeAsync, encodeWav } from "./audio/encode.js";
 import { readWavTranscript, withoutTranscript } from "./audio/wav.js";
-import { appendChunk, closeStorage, createSession, deleteSession, listSessions, loadSession, replaceSnapshot, requestPersistentStorage, storageAvailable, storageEstimate } from "./storage.js";
+import { appendChunk, closeStorage, createSession, deleteSession, listSessions, loadSession, pruneSessions, replaceSnapshot, requestPersistentStorage, storageAvailable, storageEstimate } from "./storage.js";
 import { WaveformView } from "./ui/waveform.js";
 import { Player } from "./playback.js";
 import { transcribe, cancelTranscription } from "./transcribe/whisper.js";
@@ -24,6 +24,7 @@ import {
 } from "./util/filenames.js";
 import { CLICK_PX, SPEED_MAX, SPEED_MIN, clampSpeed, speedAfterDrag, speedFromDrag, stepSpeed } from "./ui/speed.js";
 import { zoomAnchor, zoomAround } from "./ui/view.js";
+import { describeAge, describeSeconds } from "./util/describe.js";
 import { peakOf } from "./audio/normalize.js";
 import { cleanUp, cleanupActive, cleanupOptions, cleanupRanges, cleanupSummary, LIMIT_CEILING_DB, RUMBLE_CUTOFF_HZ, LEVEL_MAX_BOOST_DB, LEVEL_WINDOW_S } from "./audio/enhance.js";
 
@@ -364,10 +365,16 @@ async function persistAutosave() {
     const meta = {
       name: state.sourceName || "recording",
       sampleRate: state.sampleRate,
+      seconds: state.pcm ? state.pcm.length / state.sampleRate : 0,
       cleanup: state.cleanup || null,
     };
     if (state.keepChunks) {
-      await createSession(state.sessionId, { ...meta, type: "audio/webm", live: true });
+      // A live recording's chunks are the pristine capture, so only the metadata
+      // is written; replacing them with a WAV snapshot of an edit destroyed it.
+      // `live` reflects whether capture is actually running, so a finished
+      // recording does not come back labelled "interrupted".
+      const live = recorder.status() !== "idle";
+      await createSession(state.sessionId, { ...meta, type: "audio/webm", live });
       return;
     }
     if (autosaveSnapshotDone) {
@@ -679,6 +686,7 @@ $("recordBtn").addEventListener("click", async () => {
       sampleRate: audioContext().sampleRate,
       type: "audio/webm",
       live: true,
+      startedAt: Date.now(),
     }).catch(() => {});
     refreshDevices(); // device labels are exposed once we have mic permission
     $("recordBtn").disabled = false;
@@ -2160,6 +2168,42 @@ $("exportClips").addEventListener("click", async () => {
   });
 });
 
+// ── Transcript focus ────────────────────────────────────────────────────────
+// The transcript takes the page, while the waveform and transport stay so
+// playback and follow-along still work. Reset on load rather than remembered.
+function setTranscriptFocus(on) {
+  document.body.classList.toggle("tx-focus", on);
+  const btn = $("txFocus");
+  if (btn) {
+    btn.setAttribute("aria-pressed", on ? "true" : "false");
+    btn.textContent = on ? "exit focus" : "focus";
+  }
+  // Re-anchor once the new geometry has been laid out.
+  requestAnimationFrame(() => {
+    if (followAudio && transcriptActive >= 0) scrollTranscriptToLine(transcriptActive, "auto");
+  });
+}
+
+$("txFocus").addEventListener("click", () =>
+  setTranscriptFocus(!document.body.classList.contains("tx-focus"))
+);
+
+document.addEventListener("keydown", (e) => {
+  if (e.key !== "Escape") return;
+  if (document.body.classList.contains("tx-focus")) {
+    e.preventDefault();
+    setTranscriptFocus(false);
+  }
+});
+
+// Dragging the transcript's resize handle changes its height; keep the followed
+// line where the reader expects it.
+if (typeof ResizeObserver === "function") {
+  new ResizeObserver(() => {
+    if (followAudio && transcriptActive >= 0) scrollTranscriptToLine(transcriptActive, "auto");
+  }).observe($("transcript"));
+}
+
 // ── Boot ────────────────────────────────────────────────────────────────────
 window.addEventListener("beforeunload", (e) => {
   closeStorage();
@@ -2169,6 +2213,158 @@ window.addEventListener("beforeunload", (e) => {
   if (recording || (state.pcm && !state.saved)) {
     e.preventDefault();
     e.returnValue = "";
+  }
+});
+
+// ── Recovery ────────────────────────────────────────────────────────────────
+// Everything autosaved on this device is listed with its name, so the work is
+// identifiable before it is loaded or thrown away. Each tab writes under its own
+// session id, so two tabs never touch one record; recovering a session moves it
+// to this tab's id, which is what makes that true after a recovery too.
+const RECOVER_MAX_AGE_MS = 7 * 24 * 60 * 60 * 1000;
+let recoverSessions = [];
+
+/** A session's duration: recorded, or approximated for an interrupted capture. */
+function recoverSeconds(meta) {
+  const seconds = Number(meta.seconds);
+  if (Number.isFinite(seconds) && seconds > 0) return seconds;
+  const started = Number(meta.startedAt);
+  const saved = Number(meta.savedAt);
+  if (meta.live && Number.isFinite(started) && Number.isFinite(saved) && saved > started) {
+    return (saved - started) / 1000;
+  }
+  return 0;
+}
+
+function recoverLabel(meta) {
+  const name = String(meta.name || "").trim();
+  if (name) return name;
+  return meta.live ? "recording (unnamed)" : "untitled audio";
+}
+
+function closeRecoverPanel() {
+  $("recoverPanel").hidden = true;
+}
+
+function renderRecoverPanel() {
+  const list = $("recoverList");
+  list.innerHTML = "";
+  if (!recoverSessions.length) {
+    closeRecoverPanel();
+    return;
+  }
+  for (const meta of recoverSessions) {
+    const li = document.createElement("li");
+    li.className = "recover-item";
+
+    const info = document.createElement("div");
+    info.className = "recover-meta";
+    const name = document.createElement("span");
+    name.className = "recover-name";
+    name.textContent = recoverLabel(meta);
+    name.title = recoverLabel(meta);
+    const detail = document.createElement("span");
+    detail.className = "muted";
+    const bits = [`saved ${describeAge(meta.savedAt)}`];
+    const seconds = recoverSeconds(meta);
+    if (seconds > 0) bits.push(describeSeconds(seconds));
+    if (meta.live) bits.push("interrupted recording");
+    detail.textContent = bits.join(" · ");
+    info.append(name, detail);
+
+    const load = document.createElement("button");
+    load.className = "btn sm primary";
+    load.textContent = "Load";
+    load.onclick = () => recoverSession(meta);
+
+    const discard = document.createElement("button");
+    discard.className = "btn sm";
+    discard.textContent = "Discard";
+    discard.onclick = async () => {
+      load.disabled = discard.disabled = true;
+      try {
+        await deleteSession(meta.id);
+      } catch (e) {
+        /* removing a record that is already gone is not a failure */
+      }
+      recoverSessions = recoverSessions.filter((m) => m.id !== meta.id);
+      renderRecoverPanel();
+    };
+
+    li.append(info, load, discard);
+    list.appendChild(li);
+  }
+  $("recoverPanel").hidden = false;
+}
+
+/** Load a recoverable session into this tab, under a fresh id. */
+async function recoverSession(meta) {
+  closeRecoverPanel();
+  try {
+    await withBusy("Recovering session…", async () => {
+      const loaded = await loadSession(meta.id);
+      if (!loaded) {
+        throw new Error("it is no longer available, which usually means another tab has it");
+      }
+      const buffer = await loaded.blob.arrayBuffer();
+      const id = newSessionId();
+      // Store the copy under this tab's id *before* dropping the original: a
+      // crash mid-recovery cannot lose it, and a second tab recovering the same
+      // session simply makes its own copy instead of interleaving writes.
+      await replaceSnapshot(
+        id,
+        { ...loaded.meta, id, live: false, seconds: recoverSeconds(loaded.meta) },
+        buffer
+      );
+      await deleteSession(meta.id).catch(() => {});
+      const d = await decodeAudioBlob(new Blob([buffer], { type: loaded.meta.type || "audio/webm" }));
+      setSource(d.pcm, d.sampleRate, loaded.meta.name || "Recovered recording", {
+        autosave: false,
+        sessionId: id,
+        keepChunks: loaded.meta.type === "audio/webm",
+      });
+      autosaveSnapshotDone = true;
+      // The stored audio is the pristine source, so a clean-up that was applied
+      // when it was saved is reproduced rather than stored. Older sessions
+      // stored bare options; those mean the whole file.
+      const stored = loaded.meta.cleanup;
+      const cleanup = stored
+        ? stored.options
+          ? stored
+          : { options: stored, scope: "full" }
+        : null;
+      if (cleanup) {
+        const rendered = await renderCleanup(cleanup);
+        if (rendered) {
+          state.cleanup = cleanup;
+          await swapSource(rendered.pcm, "Recovered with clean up");
+        }
+      }
+    });
+  } catch (err) {
+    alert("Could not recover the session: " + (err && err.message ? err.message : String(err)));
+    // Put the list back, so another session can still be chosen.
+    renderRecoverPanel();
+  }
+}
+
+$("recoverKeep").addEventListener("click", closeRecoverPanel);
+$("recoverDiscardAll").addEventListener("click", async () => {
+  const count = recoverSessions.length;
+  if (!count) return;
+  if (!confirm(`Discard all ${count} saved session${count === 1 ? "" : "s"}? This cannot be undone.`)) {
+    return;
+  }
+  for (const meta of recoverSessions) {
+    await deleteSession(meta.id).catch(() => {});
+  }
+  recoverSessions = [];
+  renderRecoverPanel();
+});
+document.addEventListener("keydown", (e) => {
+  if (e.key === "Escape" && !$("recoverPanel").hidden) {
+    e.preventDefault();
+    closeRecoverPanel();
   }
 });
 
@@ -2184,53 +2380,16 @@ window.addEventListener("beforeunload", (e) => {
   $("cursorTime").textContent = "—";
   refreshDevices();
 
-  // Offer the most recent autosaved session instead of silently dropping it.
-  // The banner stays until an explicit choice; the slot is not overwritten by a
-  // later recording because every source gets its own session id.
+  // Offer everything autosaved on this device instead of silently dropping it.
+  // Sessions older than a week are swept first, so the list stays short.
   try {
     if (storageAvailable()) {
-      const sessions = await listSessions();
-      const rec = sessions[0];
-      if (rec && !state.pcm) {
-        const banner = $("recoverBanner");
-        banner.style.display = "flex";
-        $("recoverYes").onclick = async () => {
-          banner.style.display = "none";
-          try {
-            await withBusy("Recovering session…", async () => {
-              const loaded = await loadSession(rec.id);
-              if (!loaded) throw new Error("session is empty");
-              const d = await decodeAudioBlob(loaded.blob);
-              setSource(d.pcm, d.sampleRate, loaded.meta.name || "Recovered recording", {
-                autosave: false,
-                sessionId: loaded.meta.id,
-                keepChunks: loaded.meta.type === "audio/webm",
-              });
-              // The stored audio is the pristine source, so a clean-up that was
-              // applied when it was saved is reproduced rather than stored.
-              // Older sessions stored bare options; those mean the whole file.
-              const stored = loaded.meta.cleanup;
-              const cleanup = stored
-                ? stored.options
-                  ? stored
-                  : { options: stored, scope: "full" }
-                : null;
-              if (cleanup) {
-                const rendered = await renderCleanup(cleanup);
-                if (rendered) {
-                  state.cleanup = cleanup;
-                  await swapSource(rendered.pcm, "Recovered with clean up");
-                }
-              }
-            });
-          } catch (err) {
-            alert("Could not recover the previous session: " + err.message);
-          }
-        };
-        $("recoverNo").onclick = async () => {
-          banner.style.display = "none";
-          await deleteSession(rec.id).catch(() => {});
-        };
+      await pruneSessions(RECOVER_MAX_AGE_MS).catch(() => 0);
+      if (!state.pcm) {
+        // A record with no chunks is a session that never captured anything.
+        const sessions = (await listSessions()).filter((m) => m.chunks !== 0);
+        recoverSessions = sessions;
+        if (sessions.length) renderRecoverPanel();
       }
     }
   } catch (e) {
