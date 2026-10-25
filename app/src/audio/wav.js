@@ -163,6 +163,35 @@ export function withoutTranscript(arrayBuffer) {
   return out;
 }
 
+/**
+ * The transcript from the LIST/INFO chunk near the end of a WAV, without reading
+ * the whole file.
+ *
+ * `readWavTranscript` needs the buffer from the first chunk, which for a long
+ * recording means holding gigabytes. Backups append the chunk last, so a tail
+ * read is enough -- and that matters most on exactly the files this exists for.
+ * Only a payload that looks like this app's JSON is returned.
+ */
+export function readWavTranscriptTail(bytes) {
+  const view = new DataView(bytes.buffer, bytes.byteOffset, bytes.byteLength);
+  for (let i = Math.max(0, bytes.length - 1024 * 1024); i + 8 <= bytes.length; i++) {
+    if (
+      bytes[i] !== 0x49 || // I
+      bytes[i + 1] !== 0x43 || // C
+      bytes[i + 2] !== 0x4d || // M
+      bytes[i + 3] !== 0x54 // T
+    ) {
+      continue;
+    }
+    const size = view.getUint32(i + 4, true);
+    if (size <= 0 || i + 8 + size > bytes.length) continue;
+    const text = new TextDecoder().decode(bytes.subarray(i + 8, i + 8 + size));
+    const cleaned = text.replace(/\0+$/, "");
+    if (cleaned.trim().startsWith("{")) return cleaned;
+  }
+  return "";
+}
+
 /** Mono float PCM to a 16-bit WAV Blob. */
 export function encodeWavBlob(pcm, sampleRate, opts) {
   return new Blob([encodeWavBuffer(pcm, sampleRate, opts)], { type: "audio/wav" });

@@ -4,10 +4,12 @@ import {
   encodeWavBuffer,
   quantize,
   readWavTranscript,
+  readWavTranscriptTail,
   SOFT_KNEE,
   softClipSample,
   withoutTranscript,
 } from "../src/audio/wav.js";
+import { parseWavHeader } from "../src/audio/wavread.js";
 
 const str = (view, off, len) => {
   let s = "";
@@ -131,4 +133,22 @@ test("withoutTranscript strips the chunk and leaves an identical ordinary WAV", 
   // A WAV with no extra chunk is returned untouched.
   assert.equal(withoutTranscript(plain), plain);
   assert.equal(withoutTranscript(new Uint8Array([1, 2, 3]).buffer).byteLength, 3);
+});
+
+test("readWavTranscriptTail finds the chunk from the end of the file alone", () => {
+  // A backup carries the transcript last, so a tail read is enough: that is what
+  // keeps loading a long backup from reading gigabytes to find it.
+  const pcm = new Float32Array(1000);
+  const transcript = '{"format":"rtt-transcript","text":"hello"}';
+  const buffer = encodeWavBuffer(pcm, 48000, { dither: false, transcript });
+  const bytes = new Uint8Array(buffer);
+  const tail = bytes.subarray(Math.max(0, bytes.length - 1024 * 1024));
+  assert.equal(readWavTranscriptTail(tail), transcript);
+  // A WAV without one, and a plain comment that is not this app's JSON.
+  assert.equal(readWavTranscriptTail(new Uint8Array(encodeWavBuffer(pcm, 48000, { dither: false }))), "");
+  const foreign = encodeWavBuffer(pcm, 48000, { dither: false, transcript: "not json" });
+  assert.equal(readWavTranscriptTail(new Uint8Array(foreign)), "");
+  // The WAV reader itself must not be disturbed by the extra chunk.
+  const header = parseWavHeader(new Uint8Array(buffer), buffer.byteLength);
+  assert.equal(header.frames, 1000);
 });

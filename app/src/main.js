@@ -3,7 +3,7 @@ import { initDsp, getDspVersion, makeBakedMap, makeSkipBakedMap, timeStretchSkip
 import { decodeAudioBlob, audioContext, resampleHQ } from "./audio/decode.js";
 import { Recorder } from "./audio/record.js";
 import { encodeAsync } from "./audio/encode.js";
-import { encodeWavInt16Buffer, readWavTranscript, withoutTranscript } from "./audio/wav.js";
+import { encodeWavInt16Buffer, readWavTranscriptTail } from "./audio/wav.js";
 import { decimateTo, estimateLoadBytes, formatBytes } from "./audio/rate.js";
 import { probeAudio, readAudioRange } from "./audio/tracks.js";
 import { appendChunk, closeStorage, createSession, deleteSession, listSessions, loadSession, pruneSessions, replaceSnapshot, requestPersistentStorage, storageAvailable, storageEstimate } from "./storage.js";
@@ -61,7 +61,8 @@ const state = {
   cleanup: null,
   // The loaded file, kept so another part of it can be read again without a
   // second picker. Costs nothing.
-  sourceFile: null,\n  // A recording's pristine audio is already persisted chunk by chunk, so its
+  sourceFile: null,
+  // A recording's pristine audio is already persisted chunk by chunk, so its
   // autosave must not replace those chunks with a snapshot of an edit.
   keepChunks: false,
 };
@@ -756,16 +757,22 @@ $("stopRecBtn").addEventListener("click", async () => {
  * Only WAV is checked: re-reading the bytes of every file would double the I/O
  * for the common case of an MP3 or M4A, which cannot carry the chunk anyway.
  */
+/**
+ * The transcript a WAV backup carries, or null.
+ *
+ * Only the last megabyte is read: the chunk is appended at the end, and reading
+ * the whole file would defeat the point on the very recordings this protects.
+ * The WAV reader parses `fmt`/`data` and ignores the extra chunk by itself, so
+ * no stripped copy is needed for decoding.
+ */
 async function embeddedTranscript(file) {
   if (!/\.wav$/i.test(file.name || "") && file.type !== "audio/wav") return null;
   try {
-    const buffer = await file.arrayBuffer();
-    const text = readWavTranscript(buffer);
+    const size = Math.min(file.size, 1024 * 1024);
+    const tail = new Uint8Array(await file.slice(file.size - size).arrayBuffer());
+    const text = readWavTranscriptTail(tail);
     if (!text) return null;
-    // Decode without the chunk, so the browser's decoder sees exactly the bytes
-    // an ordinary WAV would have.
-    const audio = new Blob([withoutTranscript(buffer)], { type: file.type || "audio/wav" });
-    return { parsed: parseTranscriptText(text, `${file.name}.json`), audio };
+    return { parsed: parseTranscriptText(text, `${file.name}.json`) };
   } catch (e) {
     return null;
   }
