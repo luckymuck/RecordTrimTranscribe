@@ -1,12 +1,15 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import {
+  audioConfigInfo,
   audioSpecificConfig,
+  fallbackAudioConfig,
   demuxMp4,
   parseBoxesIn,
   selectSamples,
 } from "../src/audio/mp4.js";
 import { demuxMkv, parseBlock, parseMkvHeader, readVint } from "../src/audio/mkv.js";
+import { downmixWeights } from "../src/audio/tracks.js";
 
 // ── helpers ──────────────────────────────────────────────────────────────────
 
@@ -313,4 +316,67 @@ test("demuxMp4 finds a moov that sits beyond the head, at the end of the file", 
   const track = await demuxMp4(toFile(file));
   assert.equal(track.samples.length, 6);
   assert.equal(track.codec, "mp4a.40.2");
+});
+test("audioSpecificConfig steps over the ES header and long-form lengths", () => {
+  // The shape a real AAC track uses: a four-byte descriptor length and an
+  // ES_ID/flags header between the ES_Descriptor and the DecoderConfigDescriptor.
+  // Treating that header as a descriptor made the walk land in the middle of it
+  // and return nothing, which configured the decoder with no config at all.
+  const asc = Uint8Array.from([0x11, 0xb0]); // AAC-LC, 48 kHz, 5.1
+  const esds = concat([
+    new Uint8Array([0x00, 0x00, 0x00, 0x00]), // version and flags
+    new Uint8Array([0x03, 0x80, 0x80, 0x80, 0x22]), // ES_Descriptor, 4-byte length
+    new Uint8Array([0x00, 0x02, 0x00]), // ES_ID, flags
+    new Uint8Array([0x04, 0x11, 0x40, 0x15]), // DecoderConfigDescriptor
+    new Uint8Array(11), // buffer size and bitrates
+    new Uint8Array([0x05, asc.length]),
+    asc,
+  ]);
+  assert.deepEqual([...audioSpecificConfig(esds)], [...asc]);
+  assert.deepEqual(audioConfigInfo(asc), {
+    objectType: 2,
+    frequencyIndex: 3,
+    sampleRate: 48000,
+    channels: 6,
+  });
+});
+
+test("audioSpecificConfig steps over the optional ES flags", () => {
+  const asc = Uint8Array.from([0x11, 0x90]); // AAC-LC, 48 kHz, stereo
+  const esds = concat([
+    new Uint8Array([0x00, 0x00, 0x00, 0x00]),
+    // 0xE0: dependsOn_ES_ID, URL and OCR are all present.
+    new Uint8Array([0x03, 0x18, 0x00, 0x01, 0xe0, 0x00, 0x02, 0x03, 0x61, 0x62, 0x63, 0x00, 0x04]),
+    new Uint8Array([0x04, 0x11, 0x40, 0x15]),
+    new Uint8Array(11),
+    new Uint8Array([0x05, asc.length]),
+    asc,
+  ]);
+  assert.deepEqual([...audioSpecificConfig(esds)], [...asc]);
+});
+
+test("fallbackAudioConfig describes AAC-LC from the sample entry", () => {
+  const asc = fallbackAudioConfig(48000, 2);
+  assert.deepEqual([...asc], [0x11, 0x90]);
+  assert.deepEqual(audioConfigInfo(asc), {
+    objectType: 2,
+    frequencyIndex: 3,
+    sampleRate: 48000,
+    channels: 2,
+  });
+  assert.equal(fallbackAudioConfig(12345, 2), null);
+});
+test("downmixWeights favour the centre and attenuate the LFE", () => {
+  for (const channels of [1, 2, 3, 4, 5, 6, 7, 8, 9]) {
+    const w = downmixWeights(channels);
+    assert.equal(w.length, channels);
+    const total = w.reduce((a, b) => a + b, 0);
+    assert.ok(Math.abs(total - 1) < 1e-9, `${channels} channels sums to ${total}`);
+  }
+  // 5.1 is L R C LFE Ls Rs: dialogue sits in the centre.
+  const six = downmixWeights(6);
+  assert.ok(six[2] > six[0], "centre louder than a front channel");
+  assert.ok(six[3] < 0.05, `LFE attenuated, got ${six[3]}`);
+  assert.deepEqual(downmixWeights(1), [1]);
+  assert.deepEqual(downmixWeights(2), [0.5, 0.5]);
 });

@@ -106,6 +106,30 @@ export async function probeAudio(file) {
   };
 }
 
+/**
+ * Per-channel weights for a mono downmix, normalised to sum to one.
+ *
+ * A plain average buries dialogue in a 5.1 film: the centre channel carries it,
+ * and the low-frequency channel only adds rumble. The usual layouts are
+ * L R C LFE Ls Rs and their variants, which is why the centre is favoured and
+ * the LFE heavily attenuated. Unknown layouts fall back to an even average.
+ */
+export function downmixWeights(channels) {
+  const table = {
+    1: [1],
+    2: [1, 1],
+    3: [1, 1, 1.4], // L R C
+    4: [1, 1, 0.7, 1.4], // L R Ls Rs
+    5: [1, 1, 1.6, 0.7, 0.7], // L R C Ls Rs
+    6: [1, 1, 1.6, 0.15, 0.7, 0.7], // L R C LFE Ls Rs
+    7: [1, 1, 1.6, 0.15, 0.7, 0.7, 0.6],
+    8: [1, 1, 1.6, 0.15, 0.7, 0.7, 0.6, 0.6],
+  };
+  const weights = table[channels] || new Array(channels).fill(1);
+  const total = weights.reduce((a, b) => a + b, 0) || 1;
+  return weights.map((w) => w / total);
+}
+
 /** Read one sample's bytes from the file. */
 async function readSample(file, sample) {
   return new Uint8Array(await file.slice(sample.offset, sample.offset + sample.size).arrayBuffer());
@@ -151,6 +175,10 @@ async function decodeTrackRange(file, track, { startSec = 0, endSec = null, onPr
   let written = 0;
   let failed = null;
   let scratch = null;
+  // The decoder's own channel count is authoritative; the container's may be a
+  // placeholder. Weights are computed inside the callback because the stream's
+  // layout is only known once it reports one.
+  let weights = null;
 
   const decoder = new AudioDecoder({
     output: (data) => {
@@ -159,6 +187,7 @@ async function decodeTrackRange(file, track, { startSec = 0, endSec = null, onPr
         const frames = data.numberOfFrames;
         const channels = data.numberOfChannels;
         if (!scratch || scratch.length < frames) scratch = new Float32Array(frames);
+        if (!weights || weights.length !== channels) weights = downmixWeights(channels);
         const startFrame = Math.round(((data.timestamp / 1e6) - startSec) * rate);
         // Grow once if the estimate was short (a rate change, or SBR output).
         if (startFrame + frames > out.length) {
@@ -168,10 +197,11 @@ async function decodeTrackRange(file, track, { startSec = 0, endSec = null, onPr
         }
         for (let c = 0; c < channels; c++) {
           data.copyTo(scratch, { planeIndex: c, format: "f32-planar" });
+          const weight = weights[c] || 0;
           for (let i = 0; i < frames; i++) {
             const to = startFrame + i;
             if (to < 0) continue;
-            out[to] = (c === 0 ? 0 : out[to]) + scratch[i] / channels;
+            out[to] = (c === 0 ? 0 : out[to]) + scratch[i] * weight;
           }
         }
         written = Math.max(written, Math.min(out.length, startFrame + frames));
@@ -216,8 +246,13 @@ async function decodeTrackRange(file, track, { startSec = 0, endSec = null, onPr
     }
   }
   if (failed) throw failed;
+  if (!written) {
+    // A configured but misdescribed stream can decode to nothing. Say so rather
+    // than loading a silent source with a flat waveform.
+    throw new Error("the audio decoder produced no sound for this file");
+  }
   const trimmed = Math.max(1, Math.min(out.length, Math.round((end - startSec) * rate)));
-  return { pcm: out.subarray(0, Math.max(trimmed, written || 0)), sampleRate: rate, container: track.container };
+  return { pcm: out.subarray(0, Math.max(trimmed, written)), sampleRate: rate, container: track.container };
 }
 
 /** `decodeAudioData` fallback: the whole file, then trimmed to the range. */

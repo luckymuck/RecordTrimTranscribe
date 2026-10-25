@@ -99,30 +99,96 @@ function timescaleOf(v, box) {
 }
 
 /**
- * Walk an `esds` to its DecoderSpecificInfo, which is the AudioSpecificConfig
+ * Walk an MP4 `esds` to its DecoderSpecificInfo, which is the AudioSpecificConfig
  * `AudioDecoder` needs as its `description`.
+ *
+ * Each descriptor is a tag, a variable-length size (one to four bytes, high bit
+ * set on every byte but the last), then its body. The body of the ES_Descriptor
+ * starts with ES_ID and a flags byte, and the DecoderConfigDescriptor starts with
+ * thirteen fixed bytes; neither is another descriptor, so both have to be stepped
+ * over before descending. Skipping that step made the walk land in the middle of
+ * the flags and find nothing, and an AAC decoder configured without its config
+ * produces silence rather than an error.
  */
 export function audioSpecificConfig(bytes) {
   let offset = 4; // version and flags
   const end = bytes.length;
-  while (offset < end) {
-    const tag = bytes[offset++];
+  const readLength = () => {
     let length = 0;
     for (let i = 0; i < 4 && offset < end; i++) {
       const b = bytes[offset++];
       length = (length << 7) | (b & 0x7f);
       if (!(b & 0x80)) break;
     }
-    if (tag === 0x03) continue; // ES_Descriptor: its children follow inline
+    return length;
+  };
+  while (offset < end) {
+    const tag = bytes[offset++];
+    const length = readLength();
+    if (tag === 0x03) {
+      // ES_Descriptor: ES_ID (2 bytes), flags (1), then the optional fields the
+      // flags announce.
+      if (offset + 3 > end) return null;
+      const flags = bytes[offset + 2];
+      offset += 3;
+      if (flags & 0x80) offset += 2; // dependsOn_ES_ID
+      if (flags & 0x40) {
+        if (offset >= end) return null;
+        offset += 1 + bytes[offset]; // URL string, length-prefixed
+      }
+      if (flags & 0x20) offset += 2; // OCR_ES_Id
+      continue;
+    }
     if (tag === 0x04) {
-      // DecoderConfigDescriptor: 13 bytes, then its own descriptors.
+      // DecoderConfigDescriptor: objectTypeIndication, streamType/bufferSize,
+      // maxBitrate, avgBitrate.
       offset += 13;
       continue;
     }
-    if (tag === 0x05) return bytes.slice(offset, Math.min(end, offset + length));
+    if (tag === 0x05) {
+      return bytes.slice(offset, Math.min(end, offset + length));
+    }
     offset += length;
   }
   return null;
+}
+
+/**
+ * An AudioSpecificConfig built from the sample entry, for a file whose `esds` is
+ * malformed or missing. AAC-LC at the track's rate and channel count is what the
+ * sample entry describes in every practical case.
+ */
+export function fallbackAudioConfig(sampleRate, channels) {
+  const rates = [96000, 88200, 64000, 48000, 44100, 32000, 24000, 22050, 16000, 12000, 11025, 8000, 7350];
+  const index = rates.indexOf(Math.round(sampleRate));
+  if (index < 0) return null;
+  const channelConfig = Math.min(7, Math.max(1, Math.round(channels) || 2));
+  const objectType = 2; // AAC-LC
+  return Uint8Array.from([
+    (objectType << 3) | (index >> 1),
+    ((index & 1) << 7) | (channelConfig << 3),
+  ]);
+}
+
+/**
+ * The codec's own rate and channel count from an AudioSpecificConfig, or null.
+ *
+ * The first two bytes carry the object type, the sampling-frequency index and
+ * the channel configuration; that is what the decoder must be configured with.
+ */
+export function audioConfigInfo(asc) {
+  if (!asc || asc.length < 2) return null;
+  const rates = [96000, 88200, 64000, 48000, 44100, 32000, 24000, 22050, 16000, 12000, 11025, 8000, 7350];
+  const objectType = (asc[0] >> 3) & 0x1f;
+  const frequencyIndex = ((asc[0] & 0x07) << 1) | (asc[1] >> 7);
+  const channelConfig = (asc[1] >> 3) & 0x0f;
+  return {
+    objectType,
+    frequencyIndex,
+    sampleRate: rates[frequencyIndex] || 0,
+    // 7 means eight channels; 0 means "describe it in the stream instead".
+    channels: channelConfig === 7 ? 8 : channelConfig || 0,
+  };
 }
 
 function parseStts(v, box) {
@@ -287,7 +353,7 @@ export async function demuxMp4(file) {
     stblView.bytes.byteLength
   ).getUint32(stsd.bodyStart - stblView.base + entryOffset, false);
   const entryBody = stsd.bodyStart + entryOffset + 8;
-  const channels = new DataView(
+  let channels = new DataView(
     stblView.bytes.buffer,
     stblView.bytes.byteOffset,
     stblView.bytes.byteLength
@@ -304,7 +370,15 @@ export async function demuxMp4(file) {
     bytes: stblView.bytes.subarray(entryBody - stblView.base, entryBody - stblView.base + entrySize - 8),
     base: entryBody,
   };
-  const entryChildren = parseBoxesIn(entryView, entryBody + 28, entryBody + entrySize - 8);
+  // The audio sample entry header is 28 bytes at version 0; versions 1 and 2 are
+  // QuickTime variants that append 16 and 36 bytes before the child boxes.
+  const entryVersion = new DataView(
+    stblView.bytes.buffer,
+    stblView.bytes.byteOffset,
+    stblView.bytes.byteLength
+  ).getUint16(entryBody - stblView.base, false);
+  const entryHeader = 28 + (entryVersion === 1 ? 16 : entryVersion === 2 ? 36 : 0);
+  const entryChildren = parseBoxesIn(entryView, entryBody + entryHeader, entryBody + entrySize - 8);
   let esds = entryChildren.find((b) => b.type === "esds");
   if (!esds) {
     // QuickTime wraps the decoder config in a `wave` box.
@@ -318,17 +392,28 @@ export async function demuxMp4(file) {
   if (esds) {
     const payload = childView(entryView, esds);
     description = audioSpecificConfig(payload.bytes);
-    if (description && description.length >= 2) {
-      const objectType = (description[0] >> 3) & 0x1f;
-      codec = `mp4a.40.${objectType || 2}`;
-    } else {
-      codec = "mp4a.40.2";
-    }
+  }
+  if (description && description.length >= 2) {
+    const objectType = (description[0] >> 3) & 0x1f;
+    codec = `mp4a.40.${objectType || 2}`;
   } else if (entryType === "Opus" || entryType === "opus") {
     codec = "opus";
   } else if (entryType === "fLaC") {
     codec = "flac";
+  } else if (entryType === "mp4a") {
+    // No usable config descriptor: describe AAC-LC from the sample entry, which
+    // is what the entry says in every practical case. Without a description an
+    // AAC decoder is configured but has nothing to decode and yields silence.
+    description = fallbackAudioConfig(entryRate || timescale, channels);
+    codec = "mp4a.40.2";
   }
+
+  // The config descriptor is authoritative about the codec's own rate and channel
+  // count. The sample entry often disagrees -- a 5.1 track commonly declares two
+  // channels there -- and configuring the decoder from the entry then mismatches
+  // the stream.
+  const codecInfo = audioConfigInfo(description);
+  if (codecInfo && codecInfo.channels) channels = codecInfo.channels;
 
   const stts = parseStts(stblView, sttsBox);
   const sizes = parseStsz(stblView, stszBox);
