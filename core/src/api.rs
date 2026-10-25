@@ -83,7 +83,7 @@ fn crossfade_samples(sr: u32) -> usize {
 /// Append `rendered` to `out`, crossfading its first `xf` samples with the tail
 /// of `out` already there. Returns how many samples were absorbed by the
 /// crossfade, so the caller's position map can track the shortened output.
-fn append_crossfaded(out: &mut Vec<f32>, rendered: &[f64], xf: usize) -> usize {
+fn append_crossfaded(out: &mut Vec<f32>, rendered: &[f32], xf: usize) -> usize {
     if rendered.is_empty() {
         return 0;
     }
@@ -92,9 +92,9 @@ fn append_crossfaded(out: &mut Vec<f32>, rendered: &[f64], xf: usize) -> usize {
     for i in 0..overlap {
         let t = (i + 1) as f32 / (overlap + 1) as f32;
         let prev = out[tail + i];
-        out[tail + i] = prev * (1.0 - t) + rendered[i] as f32 * t;
+        out[tail + i] = prev * (1.0 - t) + rendered[i] * t;
     }
-    out.extend(rendered[overlap..].iter().map(|v| *v as f32));
+    out.extend_from_slice(&rendered[overlap..]);
     overlap
 }
 
@@ -143,12 +143,11 @@ fn skip_keep_list(
     keep
 }
 
-/// Render one kept span at a constant `rate` using the hybrid engine.
-fn stretch_span(x: &[f64], rate: f64, sr: u32) -> Vec<f64> {
+/// Render one kept span at a constant `rate`, in blocks like the whole-file render.
+fn stretch_span(x: &[f32], rate: f64, sr: u32) -> Vec<f32> {
     let rate = rate.clamp(1e-3, 1.0);
-    let tm = TimeMap::uniform(x.len() as i64, rate).unwrap_or_else(|_| TimeMap::identity(x.len() as i64));
     let rates = hybrid::uniform_rate_plan(x.len() as i64, rate);
-    hybrid::render(x, &tm, &rates, sr)
+    render_blocks(x, &rates, sr)
 }
 
 /// Offline render block size (seconds). Rendering a whole file at once keeps
@@ -181,42 +180,40 @@ fn slice_rates(rates: &[crate::timing::SegmentRate], a: i64, b: i64) -> Vec<crat
     local
 }
 
-/// Crossfade `rendered` onto `out` over `xf` samples (f64 variant).
-fn append_crossfaded_f64(out: &mut Vec<f64>, rendered: &[f64], xf: usize) {
-    if rendered.is_empty() {
-        return;
-    }
-    let overlap = xf.min(out.len()).min(rendered.len());
-    let tail = out.len() - overlap;
-    for i in 0..overlap {
-        let t = (i + 1) as f64 / (overlap + 1) as f64;
-        out[tail + i] = out[tail + i] * (1.0 - t) + rendered[i] * t;
-    }
-    out.extend_from_slice(&rendered[overlap..]);
-}
-
-/// Render `x` with `rates` in blocks, crossfading each seam.
-fn render_blocks(x: &[f64], rates: &[crate::timing::SegmentRate], sr: u32) -> Vec<f64> {
+/// Render `x` with `rates` in blocks, crossfading each seam, in `f32` throughout.
+///
+/// The whole-file `f64` copies this used to make are why a long export needed
+/// gigabytes: an hour of audio is 1.38 GB per full-length `f64` array, and the
+/// old path held the input, the output and the engine's working set at once.
+/// Converting one 30 s block at a time keeps the WASM heap to the `f32` output
+/// plus a block, which is what lets a multi-hour export run at all.
+fn render_blocks(x: &[f32], rates: &[crate::timing::SegmentRate], sr: u32) -> Vec<f32> {
     let len = x.len() as i64;
     let block = (RENDER_BLOCK_S * sr as f64) as i64;
     if len <= block {
         let tm = TimeMap::from_rates(rates, len);
-        return hybrid::render(x, &tm, rates, sr);
+        let x64: Vec<f64> = x.iter().map(|v| *v as f64).collect();
+        return hybrid::render(&x64, &tm, rates, sr)
+            .iter()
+            .map(|v| *v as f32)
+            .collect();
     }
     let overlap = ((RENDER_OVERLAP_S * sr as f64) as i64).max(1);
-    let mut out: Vec<f64> = Vec::new();
+    let mut out: Vec<f32> = Vec::new();
     let mut a = 0i64;
     while a < len {
         let b = (a + block).min(len);
         let local = slice_rates(rates, a, b);
         let tm = TimeMap::from_rates(&local, b - a);
-        let rendered = hybrid::render(&x[a as usize..b as usize], &tm, &local, sr);
+        let x64: Vec<f64> = x[a as usize..b as usize].iter().map(|v| *v as f64).collect();
+        let rendered = hybrid::render(&x64, &tm, &local, sr);
         let xf = if out.is_empty() {
             0
         } else {
             ((overlap as f64) * tm.ratio()).round() as usize
         };
-        append_crossfaded_f64(&mut out, &rendered, xf);
+        let rendered32: Vec<f32> = rendered.iter().map(|v| *v as f32).collect();
+        append_crossfaded(&mut out, &rendered32, xf);
         if b >= len {
             break;
         }
@@ -238,23 +235,22 @@ pub fn version() -> String {
 /// uniform ratio is used. Pitch is preserved in both cases.
 #[wasm_bindgen]
 pub fn time_stretch(samples: &[f32], sample_rate: u32, speed: f64, class_aware: bool) -> Vec<f32> {
-    let x = to_f64(samples);
-    if x.len() < 2 {
+    if samples.len() < 2 {
         return samples.to_vec();
     }
     let ratio = ratio_for_speed(speed);
 
-    let out = if class_aware {
-        let segments = rate::align_by_energy(&x, sample_rate);
-        let scale = solve_scale(&segments, x.len() as i64, ratio, sample_rate);
-        let rates = rate::plan_rates(&segments, x.len() as i64, scale, sample_rate);
-        render_blocks(&x, &rates, sample_rate)
+    if class_aware {
+        // Only the segments are needed for the plan, so they are taken from the
+        // f32 samples directly rather than copying the recording to f64.
+        let segments = rate::align_by_energy_f32(samples, sample_rate);
+        let scale = solve_scale(&segments, samples.len() as i64, ratio, sample_rate);
+        let rates = rate::plan_rates(&segments, samples.len() as i64, scale, sample_rate);
+        render_blocks(samples, &rates, sample_rate)
     } else {
-        let rates = hybrid::uniform_rate_plan(x.len() as i64, ratio);
-        render_blocks(&x, &rates, sample_rate)
-    };
-
-    out.iter().map(|v| *v as f32).collect()
+        let rates = hybrid::uniform_rate_plan(samples.len() as i64, ratio);
+        render_blocks(samples, &rates, sample_rate)
+    }
 }
 
 /// Summary of an analysis pass, returned as a small JSON object.
@@ -349,14 +345,13 @@ pub fn time_stretch_skip_silence(
     min_silence_s: f64,
     keep_s: f64,
 ) -> Vec<f32> {
-    let x = to_f64(samples);
-    if x.len() < 2 {
+    if samples.len() < 2 {
         return samples.to_vec();
     }
     let ratio = ratio_for_speed(speed);
-    let segments = rate::align_by_energy(&x, sample_rate);
+    let segments = rate::align_by_energy_f32(samples, sample_rate);
     let scale = if class_aware {
-        solve_scale(&segments, x.len() as i64, ratio, sample_rate)
+        solve_scale(&segments, samples.len() as i64, ratio, sample_rate)
     } else {
         ratio
     };
@@ -374,11 +369,11 @@ pub fn time_stretch_skip_silence(
     let xf = crossfade_samples(sample_rate);
     for (start, end, rate) in keep {
         let a = start.max(0) as usize;
-        let b = (end.min(x.len() as i64)).max(a as i64) as usize;
+        let b = (end.min(samples.len() as i64)).max(a as i64) as usize;
         if b <= a {
             continue;
         }
-        let rendered = stretch_span(&x[a..b], rate, sample_rate);
+        let rendered = stretch_span(&samples[a..b], rate, sample_rate);
         append_crossfaded(&mut out, &rendered, xf);
     }
     out

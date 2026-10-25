@@ -192,6 +192,35 @@
   <div class="drop-box">Drop an audio file to load it</div>
 </div>
 
+<div id="partPanel" class="recover-panel" role="dialog" aria-modal="true" aria-labelledby="partTitle" hidden>
+  <div class="recover-box">
+    <h3 id="partTitle">This file is large</h3>
+    <p class="muted" id="partWarn"></p>
+    <div class="row">
+      <label class="chk">part length
+        <select id="partLength" aria-label="Part length">
+          <option value="900">15 min</option>
+          <option value="1800">30 min</option>
+          <option value="3600" selected>1 hour</option>
+        </select>
+      </label>
+      <label class="chk">keep at
+        <select id="partRate" aria-label="Sample rate to keep">
+          <option value="48000" selected>48 kHz (full quality)</option>
+          <option value="24000">24 kHz (half the memory)</option>
+          <option value="16000">16 kHz (speech only)</option>
+        </select>
+      </label>
+    </div>
+    <p class="muted" id="partEstimate"></p>
+    <ul id="partList" class="recover-list"></ul>
+    <div class="row">
+      <button class="btn sm" id="partWhole">Load the whole file anyway</button>
+      <button class="btn sm" id="partCancel">Cancel</button>
+    </div>
+  </div>
+</div>
+
 <div id="recoverPanel" class="recover-panel" role="dialog" aria-modal="true" aria-labelledby="recoverTitle" hidden>
   <div class="recover-box">
     <h3 id="recoverTitle">Unsaved work from a previous session</h3>

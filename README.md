@@ -1,10 +1,10 @@
-﻿# Record · Trim · Transcribe
+# Record � Trim � Transcribe
 
 A local-first audio tool that runs entirely on your machine: record or load
 audio, trim and split it, clean it up, play it back faster, transcribe it
 on-device, and export the results. Nothing is uploaded.
 
-**[Open the web app](https://luckymuck.github.io/RecordTrimTranscribe/)** — or
+**[Open the web app](https://luckymuck.github.io/RecordTrimTranscribe/)** � or
 build the [portable desktop app](#portable) to use it with no network at all.
 
 <img src="assets/app-screenshot.png" alt="The app: a waveform with a labelled split, the clip list with generated names, and a word-timestamped transcript" width="520">
@@ -13,7 +13,7 @@ build the [portable desktop app](#portable) to use it with no network at all.
 
 1. **Record** audio.
 2. **Load** local audio files.
-3. **Playback** at 1.0×–4.0× while maximizing intelligibility by preserving consonant sounds.
+3. **Playback** at 1.0ז4.0� while maximizing intelligibility by preserving consonant sounds.
 4. **Clean up** with: rumble filter, RNNoise denoise, voice leveling, consonant boost, normalize, and peak limiter.
 5. **Trim/Split** audio into separate clips.
 6. **Transcribe** on-device with Whisper.
@@ -21,12 +21,24 @@ build the [portable desktop app](#portable) to use it with no network at all.
 
 ## Recording
 
-- **Devices** — **device settings** reveals the input and output pickers and asks
+- **Devices** - **device settings** reveals the input and output pickers and asks
   for microphone permission, which browsers require before they will show device
   names. The pickers stay out of the way until the button is switched on.
-- **Drag and drop** — drop an audio file anywhere on the page to load it. If
+- **Drag and drop** - drop an audio file anywhere on the page to load it. If
   something is already loaded or recorded, the drop asks before replacing it.
-- **Recorded files** — the current clip is **autosaved to IndexedDB**; after any
+- **Loading a long file.** Before decoding, the duration and sample rate are read
+  from the container and the memory cost is estimated against what this computer
+  can plausibly give the app. If it does not fit, a **part panel** appears: choose
+  a part length (15 min, 30 min or 1 hour) and a rate to keep (48, 24 or 16 kHz,
+  which halves and quarters the cost), and load one part. Each part is a normal
+  recording with its own 0-based timeline, clean-up, transcript and export.
+- **How files are read.** A WAV is read as PCM directly, by byte range, so a
+  six-hour file opens as a part without decoding the rest and without the 2 GB
+  argument limit that `decodeAudioData` imposes. An **MP4/M4A/MOV or MKV/WebM**
+  has only its audio track demuxed; the video is never read or decoded, which is
+  what makes a 2 GB video with a 150 MB audio track cost almost nothing. Anything
+  else goes through the browser's decoder and is trimmed to the range.
+- **Recorded files** � the current clip is **autosaved to IndexedDB**; after any
   browser close a **recovery panel** lists everything saved on the device, each
   entry showing its name (the file's name, or the tentative `MMDDYYYY HHMM` of a
   recording), when it was last saved, its length and whether it was an
@@ -41,10 +53,10 @@ build the [portable desktop app](#portable) to use it with no network at all.
 
 - **Space** or the transport button toggles play/stop at the playhead.
 - Change speed by click-dragging the speed readout left/right; double-click to
-  reset. The range is 1.00×–4.00×; there is no slow-down.
+  reset. The range is 1.00ז4.00�; there is no slow-down.
 - **Skip silence** skips any silence longer than 0.25 s, leaving a 0.2 s pause
   split evenly across the two edges of the gap so the words it separates are not
-  clipped. The pause is measured at 1.00×, but is never below 0.1 s of output.
+  clipped. The pause is measured at 1.00�, but is never below 0.1 s of output.
   Pauses shorter than the threshold are kept as-is.
 - **Streaming (real-time).** `StreamStretcher` renders the buffered audio in
   short blocks using the *same* hybrid engine used offline (`engines::hybrid`),
@@ -65,13 +77,13 @@ build the [portable desktop app](#portable) to use it with no network at all.
   **Run clean-up** button; running it applies the selected stages to the
   recording before anything is stretched, because stretching exaggerates noise
   and breath, and then closes the panel. The stages are:
-  - **rumble filter** — an 80 Hz high-pass that removes rumble, hum and handling
+  - **rumble filter** � an 80 Hz high-pass that removes rumble, hum and handling
     noise (on by default).
-  - **denoise** — [RNNoise](https://gitlab.xiph.org/xiph/rnnoise) speech
+  - **denoise** � [RNNoise](https://gitlab.xiph.org/xiph/rnnoise) speech
     denoising, run at 48 kHz in 10 ms frames and resampled back (on by default).
     Loaded from the vendored build under `app/vendor/rnnoise/`; there is no CDN
     fallback, so nothing can reach out. The model's state is reset for every run.
-  - **level voices** — brings quiet passages up toward the loud ones, so a
+  - **level voices** � brings quiet passages up toward the loud ones, so a
     speaker further from the microphone is heard at about the same level as one
     close to it. Utterances are levelled one at a time: each is measured over its
     own speech and gets one gain, with the gain ramping across the pauses, so a
@@ -80,20 +92,20 @@ build the [portable desktop app](#portable) to use it with no network at all.
     loud level) and a frame already near the loud level is not lifted with its
     passage, so a thump or click cannot be pushed up by a boost meant for the
     quiet speech around it.
-  - **consonant boost** — a high-shelf above 2 kHz with a 0–6 dB strength control
+  - **consonant boost** � a high-shelf above 2 kHz with a 0�6 dB strength control
     plus light high-band compression, so soft consonants sit closer to the vowels.
     The compressor's threshold comes from the band's own level, so the stage is a
     boost at every input level instead of turning into a cut on loud material.
-  - **normalize** — sets the level, either to a −1 dBFS peak or to −20 dBFS RMS
+  - **normalize** � sets the level, either to a -1 dBFS peak or to -20 dBFS RMS
     measured over the speech-active frames (pauses and transients excluded). The
     RMS mode only ever raises; the limiter handles the peaks.
-  - **limit peaks** — a −1 dBFS lookahead limiter. It also runs automatically
+  - **limit peaks** � a -1 dBFS lookahead limiter. It also runs automatically
     whenever a stage raised the level, and on any export whose peak would run
     over the ceiling, so cleaned audio cannot clip.
-  - **apply to** — when the recording has splits, the clean-up can be applied to
+  - **apply to** � when the recording has splits, the clean-up can be applied to
     the whole file at once, to **each clip** on its own, or to one named clip.
-    Per clip, every stage measures and acts on that clip alone — normalize over
-    clip 1, then clip 2, and so on — which is what a clip exported on its own
+    Per clip, every stage measures and acts on that clip alone � normalize over
+    clip 1, then clip 2, and so on � which is what a clip exported on its own
     needs.
 
 ## Export
@@ -131,7 +143,7 @@ the followed line is re-anchored after any resize.
 `<base>.mp3`. Timestamps always refer to the unbaked source, so a speed or
 silence-stripped audio export carries no matching suffix here. A transcript can
 be loaded back with **Load transcript** (`.srt`, `.vtt`, `.txt` or `.json`) or by
-dropping it on the page — dropping the audio and its transcript together pairs
+dropping it on the page � dropping the audio and its transcript together pairs
 them by name. A loaded transcript is marked *imported* until something is
 transcribed in the session. The `.json` form round-trips exactly, word timings
 included; SRT and VTT carry cue timings only, so they reload one chunk per cue.
@@ -140,18 +152,18 @@ and transcript together: the chunk is a standard `LIST`/`INFO` comment that
 players ignore, and it is stripped before decoding so it cannot affect how the
 audio loads.
 
-Speech that produced **no words at all** is marked `**` — a span of speech-shaped
+Speech that produced **no words at all** is marked `**` � a span of speech-shaped
 energy the model did not turn into anything, which usually means it was not
 intelligible. (Per-word confidence is not shown: the transcription library does
 not expose it.)
 
 ## Ways to run it
 
-- **GitHub Pages** — the web app, at
+- **GitHub Pages** � the web app, at
   `https://luckymuck.github.io/RecordTrimTranscribe/`.
-- **Website** — a static client (`app/`) served locally. All audio decoding, DSP,
+- **Website** � a static client (`app/`) served locally. All audio decoding, DSP,
   transcription and encoding run in the browser; nothing is uploaded.
-- **Windows app** — the same `app/` assets wrapped in a Tauri shell that uses the
+- **Windows app** � the same `app/` assets wrapped in a Tauri shell that uses the
   built-in WebView2 runtime. No Python, Node or Rust needed to run it.
 
 ## Layout
@@ -210,14 +222,14 @@ restricted to `'self'`.
 
 The executable is **235 MB** because the models are inside it (Tauri compresses
 the embedded assets). Run it from any writable folder: no installation, no
-registry entries, and no shortcuts. Everything the app saves — recordings,
-sessions, settings and the model cache — lives in an `app-data` folder created
+registry entries, and no shortcuts. Everything the app saves � recordings,
+sessions, settings and the model cache � lives in an `app-data` folder created
 beside the executable (via Tauri's `appDirectoriesOverride`), so the whole folder
 can be moved, copied to a USB stick, or deleted without leaving anything behind.
 Windows 10 (April 2018+) and Windows 11 already include the WebView2 runtime the
 app needs.
 
-Both scripts need either Tauri CLI — `cargo install tauri-cli`, or
+Both scripts need either Tauri CLI � `cargo install tauri-cli`, or
 `npm i -D @tauri-apps/cli`, which `build-portable.bat` picks up automatically
 through `npx`. The **first** build compiles the whole Tauri dependency tree and
 takes roughly 25 minutes; later builds reuse it and take about three. The icon
@@ -240,12 +252,19 @@ files up to 2 GiB with no bandwidth limit, whereas Pages caps a site at 1 GB and
 so a download can be verified.
 
 The executable is **not code-signed**, so Windows shows "Windows protected your
-PC" the first time it runs and the user has to choose *More info → Run anyway*.
+PC" the first time it runs and the user has to choose *More info ? Run anyway*.
 Worth stating in the release notes as well as in the bundled `README.txt`. Code
 signing would remove the prompt but needs a certificate.
 
 ## Known limitations
 
+- **MP4 and MKV audio needs WebCodecs.** The demuxers read the sample tables
+  themselves, but the compressed audio is decoded by the browser's own codec.
+  Chromium, Edge and the desktop WebView2 have it, as does Firefox 130+; Safari's
+  support is limited, so there such a file falls back to the browser's whole-file
+  decoder and its 2 GB limit. MP4 audio covers AAC and Opus; MKV covers Opus, AAC
+  and Vorbis; other codecs report that they are unsupported rather than failing
+  obscurely.
 - **Class-aware allocation is approximated.** FastTalk's headline feature
   allocates the speed budget per *phone class* using Montreal Forced Aligner
   output, which is not available in a browser. This port uses energy-based
@@ -256,7 +275,7 @@ signing would remove the prompt but needs a certificate.
   the portable desktop build includes them.
 - The pristine source is kept in memory as 16-bit PCM (half an f32 copy, about
   173 MB for 30 minutes or 346 MB for an hour at 48 kHz). Its quantization sits
-  at about −96 dBFS, far below any recording's own noise floor, so it costs
+  at about -96 dBFS, far below any recording's own noise floor, so it costs
   nothing audible and keeps transcription unaffected. A recording's original
   WebM chunks are left in place on disk rather than replaced by a snapshot of an
   edit, and a loaded file's pristine copy is re-read from the file handle.
@@ -273,8 +292,9 @@ cargo test            # 77 tests: timing, pitch, PSOLA, WSOLA, streaming, rate,
 node dsp_smoke.mjs    # WASM bindings end-to-end (needs: npx wasm-pack build --target nodejs)
 
 cd ..
-node --test app/test/*.test.mjs   # 92 JS unit tests: transcript formatting and
-                                  # parsing (SRT/VTT/JSON), filenames, split
+node --test app/test/*.test.mjs   # 112 JS unit tests: WAV, MP4 and MKV reading,
+                                  # resume labels, transcript parsing
+                                  # (SRT/VTT/JSON), filenames, split
                                   # boundaries, dial and zoom arithmetic, WAV
                                   # encoding and the embedded transcript,
                                   # speech-active normalization, clean-up scopes,
@@ -298,10 +318,10 @@ GPL-3.0; see `app/vendor/rnnoise/COPYING`.
 
 Other vendored third-party code, all compatible with GPL-3.0:
 
-- `app/vendor/lamejs/` — the MP3 encoder, LGPL-3.0.
-- `app/vendor/transformers/` — the transformers.js bundle (Apache-2.0) with
+- `app/vendor/lamejs/` � the MP3 encoder, LGPL-3.0.
+- `app/vendor/transformers/` � the transformers.js bundle (Apache-2.0) with
   ONNX Runtime Web inlined (MIT).
-- `app/vendor/fasttalk-core/` — built from this repository's own `core/` crate.
+- `app/vendor/fasttalk-core/` � built from this repository's own `core/` crate.
 
 The portable build ships `LICENSE` and `THIRD-PARTY-NOTICES.txt`, which lists
 every bundled component with its licence text.

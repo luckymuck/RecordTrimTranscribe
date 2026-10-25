@@ -1,9 +1,11 @@
 // Application wiring: record/load → waveform → playback → transcribe → export.
 import { initDsp, getDspVersion, makeBakedMap, makeSkipBakedMap, timeStretchSkipSilence, silenceZones, softLimiter, levelVoices, highpassFilter } from "./core/dsp.js";
-import { decodeAudioBlob, audioContext } from "./audio/decode.js";
+import { decodeAudioBlob, audioContext, resampleHQ } from "./audio/decode.js";
 import { Recorder } from "./audio/record.js";
-import { encodeAsync, encodeWav } from "./audio/encode.js";
-import { readWavTranscript, withoutTranscript } from "./audio/wav.js";
+import { encodeAsync } from "./audio/encode.js";
+import { encodeWavInt16Buffer, readWavTranscript, withoutTranscript } from "./audio/wav.js";
+import { decimateTo, estimateLoadBytes, formatBytes } from "./audio/rate.js";
+import { probeAudio, readAudioRange } from "./audio/tracks.js";
 import { appendChunk, closeStorage, createSession, deleteSession, listSessions, loadSession, pruneSessions, replaceSnapshot, requestPersistentStorage, storageAvailable, storageEstimate } from "./storage.js";
 import { WaveformView } from "./ui/waveform.js";
 import { Player } from "./playback.js";
@@ -57,7 +59,9 @@ const state = {
   // `{ options, scope }`, or null. `scope` is "full", "clips" (each clip on its
   // own) or a clip index as a string.
   cleanup: null,
-  // A recording's pristine audio is already persisted chunk by chunk, so its
+  // The loaded file, kept so another part of it can be read again without a
+  // second picker. Costs nothing.
+  sourceFile: null,\n  // A recording's pristine audio is already persisted chunk by chunk, so its
   // autosave must not replace those chunks with a snapshot of an edit.
   keepChunks: false,
 };
@@ -384,8 +388,20 @@ async function persistAutosave() {
       await createSession(state.sessionId, { ...meta, type: "audio/wav" });
       return;
     }
-    const blob = encodeWav(pristinePcm() || state.pcm, state.sampleRate);
-    const buffer = await blob.arrayBuffer();
+    // The pristine source is already 16-bit, so the WAV is written straight from
+    // it: no `f32` copy to re-quantize and no second copy of the bytes.
+    const transcript = state.transcript
+      ? toTranscriptJson(state.transcript, {
+          source: state.sourceName,
+          sampleRate: state.sampleRate,
+          duration: state.pcm.length / state.sampleRate,
+        })
+      : "";
+    const buffer = encodeWavInt16Buffer(
+      state.original || toInt16(state.pcm),
+      state.sampleRate,
+      { transcript }
+    );
     await replaceSnapshot(state.sessionId, { ...meta, type: "audio/wav" }, buffer);
     autosaveSnapshotDone = true;
   } catch (e) {
@@ -427,6 +443,8 @@ function setSource(pcm, sampleRate, label, { autosave = true, saved = false, ses
   state.original = toInt16(pcm);
   state.cleanup = null;
   state.keepChunks = keepChunks;
+  // A recording replaces any file handle; a load sets it again afterwards.
+  state.sourceFile = null;
   autosaveSnapshotDone = false;
   // A new source invalidates the edit history.
   clearHistory();
@@ -753,30 +771,56 @@ async function embeddedTranscript(file) {
   }
 }
 
-/** Decode `file` and make it the source. Returns false when it was refused. */
-async function loadAudioFile(file) {
+/**
+ * Decode `file` (or a part of it) and make it the source.
+ *
+ * `readAudioRange` picks the cheapest path: our own WAV reader, the MP4/MKV
+ * demuxer plus WebCodecs, or the browser's decoder. `rate` resamples the result
+ * down to save memory. Returns false when it was refused.
+ */
+async function loadAudioFile(file, { startSec = 0, endSec = null, rate = null, probe = null } = {}) {
   if (transcribing) return false;
-  // REC-10: decoding expands the whole file to 32-bit float (an hour of stereo
-  // is about 1.4 GB before the mono mixdown). Warn before a big one, and give a
-  // clear message if it fails rather than a bare browser error.
-  if (file.size > 100 * 1024 * 1024) {
+  const whole = startSec === 0 && endSec == null;
+  // REC-10: a whole-file decode of a big file can run out of memory. The
+  // pre-flight has already looked at the real cost where it could.
+  if (file.size > 100 * 1024 * 1024 && whole) {
     const ok = confirm(
-      `This file is ${(file.size / 1048576).toFixed(0)} MB. Decoding expands it to 32-bit float in memory ` +
-        `(several times the file size), and a very long file can fail. Continue?`
+      `This file is ${(file.size / 1048576).toFixed(0)} MB. Loading it whole expands the audio ` +
+        `in memory, and a very long file can fail. Continue?`
     );
     if (!ok) return false;
   }
-  const carried = await embeddedTranscript(file);
+  // Only a whole WAV can carry this app's embedded transcript.
+  const carried = whole ? await embeddedTranscript(file) : null;
   try {
-    await withBusy(`Loading ${file.name}…`, async () => {
-      const d = await decodeAudioBlob(carried ? carried.audio : file);
-      // The file is already on disk: no IndexedDB copy, and not "unsaved".
-      setSource(d.pcm, d.sampleRate, file.name, { autosave: false, saved: true });
+    await withBusy(`Reading ${file.name}…`, async () => {
+      const decoded = await readAudioRange(file, {
+        startSec,
+        endSec,
+        track: probe ? probe.track : null,
+        onProgress: (f) => {
+          $("busyText").textContent = `Reading audio… ${Math.round(f * 100)}%`;
+        },
+      });
+      let pcm = decoded.pcm;
+      let sampleRate = decoded.sampleRate;
+      if (rate && rate !== sampleRate) {
+        $("busyText").textContent = `Resampling to ${Math.round(rate / 1000)} kHz…`;
+        pcm = decimateTo(pcm, sampleRate, rate);
+        sampleRate = rate;
+      }
+      const label = whole
+        ? file.name
+        : `${file.name} (part ${describeSeconds(startSec)}–${describeSeconds(
+            endSec == null ? decoded.pcm.length / decoded.sampleRate : endSec
+          )})`;
+      setSource(pcm, sampleRate, label, { autosave: false, saved: true });
+      state.sourceFile = file;
       if (carried) applyImportedTranscript(carried.parsed, `${file.name} (embedded)`);
     });
   } catch (err) {
     const detail = err && err.message ? err.message : String(err);
-    alert(`Could not decode file: ${detail}\n\nVery long files can run out of memory while decoding.`);
+    alert(`Could not read the audio: ${detail}`);
     return false;
   }
   return true;
@@ -785,7 +829,153 @@ async function loadAudioFile(file) {
 /** True when it is an audio or video file the decoder can try. */
 function looksLikeAudio(file) {
   if (file.type) return /^(audio|video)\//.test(file.type);
-  return /\.(wav|mp3|m4a|aac|ogg|oga|opus|webm|flac|mp4|mov|aiff?|wma)$/i.test(file.name || "");
+  return /\.(wav|mp3|m4a|aac|ogg|oga|opus|webm|flac|mp4|mov|mkv|mka|aiff?|wma)$/i.test(file.name || "");
+}
+
+// ── Pre-flight: will this file fit, and if not, which part? ─────────────────
+// The estimate is the working copy plus the pristine one; the budget comes from
+// the browser's own numbers, and a real allocation probe settles the borderline
+// cases. Long files are then loaded one part at a time, which is what the
+// format readers make cheap: a WAV is read by byte range, and an MP4 or MKV has
+// only its audio track touched at all.
+
+/** Bytes this machine can plausibly give the app, from what the browser admits. */
+function memoryBudget() {
+  let budget = 512 * 1024 * 1024;
+  const device = Number(navigator.deviceMemory);
+  if (Number.isFinite(device) && device > 0) budget = Math.max(budget, device * 1024 ** 3 * 0.25);
+  const heap = performance.memory && Number(performance.memory.jsHeapSizeLimit);
+  if (Number.isFinite(heap) && heap > 0) budget = Math.max(budget, heap * 0.35);
+  // WASM cannot exceed 4 GiB, and the page needs room of its own.
+  return Math.min(budget, 2.5 * 1024 ** 3);
+}
+
+/**
+ * Whether `bytes` can be allocated right now. Pages are touched, not just
+ * reserved: an overcommitting OS will happily hand out an untouched buffer.
+ */
+function canAllocate(bytes) {
+  const size = Math.max(1, Math.floor(bytes));
+  try {
+    const probe = new Uint8Array(size);
+    for (let i = 0; i < size; i += 4096) probe[i] = 1;
+    probe[size - 1] = 1;
+    return true;
+  } catch (e) {
+    return false;
+  }
+}
+
+let pendingFiles = { file: null, probe: null, budget: 0, played: false };
+
+/** Close the part panel without loading anything. */
+function closePartPanel() {
+  $("partPanel").hidden = true;
+  pendingFiles = { file: null, probe: null, budget: 0, played: false };
+}
+
+/** The per-part estimate at the chosen length and rate. */
+function partEstimate(seconds, rate, probe) {
+  const exact = probe && probe.exact;
+  return estimateLoadBytes(seconds, rate, { compressedBytes: exact ? 0 : probe ? probe.fileSize : 0 });
+}
+
+/** Redraw the part list for the current length and rate. */
+function renderPartPanel() {
+  const { file, probe, budget } = pendingFiles;
+  if (!file || !probe) return;
+  const length = Number($("partLength").value) || 3600;
+  const rate = Number($("partRate").value) || 48000;
+  const total = probe.durationSeconds || 0;
+  const parts = Math.max(1, Math.ceil(total / length));
+  const list = $("partList");
+  list.innerHTML = "";
+  const shown = Math.min(parts, 40);
+  for (let i = 0; i < shown; i++) {
+    const start = i * length;
+    const end = Math.min(total, start + length);
+    const seconds = Math.max(0, end - start);
+    const estimate = partEstimate(seconds, rate, probe);
+    const li = document.createElement("li");
+    li.className = "recover-item";
+    const info = document.createElement("div");
+    info.className = "recover-meta";
+    const name = document.createElement("span");
+    name.className = "recover-name";
+    name.textContent = `Part ${i + 1}: ${describeSeconds(start)} – ${describeSeconds(end)}`;
+    const detail = document.createElement("span");
+    detail.className = "muted";
+    detail.textContent = `about ${formatBytes(estimate)} in memory`;
+    info.append(name, detail);
+    const load = document.createElement("button");
+    load.className = "btn sm primary";
+    load.textContent = "Load";
+    load.disabled = estimate > budget && !canAllocate(estimate);
+    load.title = load.disabled ? "This part is larger than this computer can hold" : "";
+    load.onclick = () => {
+      const { file: chosen, probe: chosenProbe } = pendingFiles;
+      closePartPanel();
+      loadAudioFile(chosen, { startSec: start, endSec: end, rate, probe: chosenProbe });
+    };
+    li.append(info, load);
+    list.appendChild(li);
+  }
+  if (parts > shown) {
+    const li = document.createElement("li");
+    li.className = "recover-empty";
+    li.textContent = `…and ${parts - shown} more; choose a longer part length to see fewer.`;
+    list.appendChild(li);
+  }
+  $("partEstimate").textContent =
+    `Each part is kept at ${Math.round(rate / 1000)} kHz. This computer can hold about ` +
+    `${formatBytes(budget)}; the whole file would need about ${formatBytes(partEstimate(total, rate, probe))}.`;
+  $("partWhole").disabled = partEstimate(total, rate, probe) > budget && !canAllocate(partEstimate(total, rate, probe));
+}
+
+/** Open the part panel for a file that does not fit whole. */
+function openPartPanel(file, probe, budget) {
+  pendingFiles = { file, probe, budget, played: false };
+  $("partWarn").textContent =
+    `"${file.name}" is ${formatBytes(file.size)}${probe.durationSeconds ? ` and ${describeSeconds(probe.durationSeconds)} long` : ""}. ` +
+    `Loading it whole would need about ${formatBytes(partEstimate(probe.durationSeconds, 48000, probe))} ` +
+    `of memory, and this computer can hold about ${formatBytes(budget)}. Choose a part to load instead — ` +
+    `each part is a normal recording you can clean up, transcribe and export.`;
+  $("partPanel").hidden = false;
+  renderPartPanel();
+}
+
+$("partLength").addEventListener("change", renderPartPanel);
+$("partRate").addEventListener("change", renderPartPanel);
+$("partCancel").addEventListener("click", closePartPanel);
+$("partWhole").addEventListener("click", () => {
+  const { file, probe } = pendingFiles;
+  closePartPanel();
+  if (file) loadAudioFile(file, { probe });
+});
+
+/**
+ * Look at a file before loading it: read its real duration, estimate the memory,
+ * and either load it or offer its parts. This is where the 2 GB `decodeAudioData`
+ * limit used to stop the app with a browser error instead of a choice.
+ */
+async function chooseAndLoad(file) {
+  if (transcribing) return false;
+  let probe = null;
+  try {
+    probe = await probeAudio(file);
+    probe.fileSize = file.size;
+  } catch (e) {
+    probe = null;
+  }
+  const budget = memoryBudget();
+  const estimate = probe
+    ? partEstimate(probe.durationSeconds, probe.sampleRate || 48000, probe)
+    : file.size * 3;
+  if (probe && probe.durationSeconds && estimate > budget) {
+    openPartPanel(file, probe, budget);
+    return false;
+  }
+  return loadAudioFile(file, { probe });
 }
 
 $("fileInput").addEventListener("change", async (e) => {
@@ -794,7 +984,7 @@ $("fileInput").addEventListener("change", async (e) => {
   e.target.value = "";
   if (!file) return;
   if (!confirmIfUnsaved()) return;
-  await loadAudioFile(file);
+  await chooseAndLoad(file);
 });
 
 // ── Drag and drop a file onto the page ───────────────────────────────────────
@@ -870,7 +1060,7 @@ window.addEventListener("drop", async (e) => {
       return;
     }
   }
-  const loaded = await loadAudioFile(audio);
+  const loaded = await chooseAndLoad(audio);
   if (!loaded) return;
   // Prefer a transcript that shares the audio's name; otherwise take the first.
   const base = exportBaseName(audio.name).toLowerCase();
@@ -1354,7 +1544,10 @@ $("saveBackup").addEventListener("click", async () => {
     try {
       // The transcript rides along in a LIST/INFO chunk, so one file reloads
       // audio and transcript together and needs no re-transcribing. Players and
-      // decoders ignore the chunk, so this is still an ordinary WAV.
+      // decoders ignore the chunk, so this is still an ordinary WAV. It is
+      // written from the pristine 16-bit source: a backup is the original, not
+      // the cleaned render (which is what the Export card is for), and no f32
+      // copy of a long recording is made to write it.
       const transcript = state.transcript
         ? toTranscriptJson(state.transcript, {
             source: state.sourceName,
@@ -1362,8 +1555,12 @@ $("saveBackup").addEventListener("click", async () => {
             duration: state.pcm.length / state.sampleRate,
           })
         : "";
-      const out = encodeWav(state.pcm, state.sampleRate, { transcript });
-      downloadBlob(out, backupName(state.sourceName));
+      const buffer = encodeWavInt16Buffer(
+        state.original || toInt16(state.pcm),
+        state.sampleRate,
+        { transcript }
+      );
+      downloadBlob(new Blob([buffer], { type: "audio/wav" }), backupName(state.sourceName));
       markSaved();
       $("saveStatus").textContent = transcript ? "saved ✓ (with transcript)" : "saved ✓";
     } catch (err) {
@@ -1500,8 +1697,8 @@ $("transcribeBtn").addEventListener("click", async () => {
   resetTranscriptView();
   try {
     $("txStatus").textContent = "Preparing audio…";
-    const input = transcriptionInput(scope);
-    const raw = await transcribe(input, state.sampleRate, $("modelSel").value, {
+    const prepared = await transcriptionInput(scope);
+    const raw = await transcribe(prepared.pcm, prepared.rate, $("modelSel").value, {
       language: $("langSel").value || undefined,
       onStatus: (s) => {
         // The pipeline announces the switch, so the bar restarts for the new phase.
@@ -1598,27 +1795,32 @@ function transcriptionScope() {
 }
 
 /**
- * The audio handed to Whisper.
+ * The audio handed to Whisper, at 16 kHz.
  *
  * The pristine source by default: denoising and the consonant shelf are tuned
  * for listening, and can remove detail the model uses, while Whisper is trained
  * on noisy audio and prefers it unshaped. A rumble high-pass and the leveler
  * stay, because a consistent level genuinely helps the model and a gain cannot
  * move a timestamp. The cleaned render is available behind the checkbox.
+ *
+ * The resample happens first, with the browser's own filter: Whisper reads 16 kHz
+ * whatever it is given, so doing it here means the heavier stages run on a
+ * quarter of the samples and the 48 kHz copy is released before them.
  */
-function transcriptionInput(scope) {
-  const out = new Float32Array(scope.pcm.length);
+async function transcriptionInput(scope) {
+  const source = new Float32Array(scope.pcm.length);
   const useCleaned = $("txCleaned").checked && state.cleanup;
   if (!state.original || useCleaned) {
-    out.set(scope.pcm);
+    source.set(scope.pcm);
   } else {
     const start = scope.startSample || 0;
-    for (let i = 0; i < out.length; i++) out[i] = state.original[start + i] / 32767;
+    for (let i = 0; i < source.length; i++) source[i] = state.original[start + i] / 32767;
   }
-  // In place: the stages mutate this buffer only.
-  highpassFilter(out, state.sampleRate, RUMBLE_CUTOFF_HZ);
-  levelVoices(out, state.sampleRate, LEVEL_MAX_BOOST_DB, LEVEL_WINDOW_S);
-  return out;
+  const rate = 16000;
+  const pcm = await resampleHQ(source, state.sampleRate, rate);
+  highpassFilter(pcm, rate, RUMBLE_CUTOFF_HZ);
+  levelVoices(pcm, rate, LEVEL_MAX_BOOST_DB, LEVEL_WINDOW_S);
+  return { pcm, rate };
 }
 // ── Transcript view ─────────────────────────────────────────────────────────
 // Follow-along state: the rendered lines, their start times for the lookup, the

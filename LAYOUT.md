@@ -12,6 +12,11 @@ app/                     The whole product surface (static, client-side)
     audio/               decode, MediaRecorder capture, WAV + MP3 encoders,
                          normalization arithmetic (speech-active RMS), RNNoise
                          denoise, clean-up chain
+    audio/wavread.js     WAV header parsing and byte-range PCM reading
+    audio/mp4.js         MP4 audio-track demuxer (sample tables, ranges)
+    audio/mkv.js         Matroska/WebM audio demuxer (EBML, clusters, lacing)
+    audio/tracks.js      probe a container and read a range of its audio
+    audio/rate.js        rate reduction and load-size estimates
     ui/waveform.js       overview + zoomable waveform, playhead, split markers
     ui/speed.js          speed-dial arithmetic (1.00x-4.00x, no slow-down)
     ui/view.js           zoom/pan arithmetic

@@ -167,3 +167,38 @@ export function withoutTranscript(arrayBuffer) {
 export function encodeWavBlob(pcm, sampleRate, opts) {
   return new Blob([encodeWavBuffer(pcm, sampleRate, opts)], { type: "audio/wav" });
 }
+
+/**
+ * Mono `Int16` PCM to a WAV, writing the samples through unchanged.
+ *
+ * The pristine source is already 16-bit, so this is lossless with respect to it,
+ * and it avoids materialising a full-length `f32` copy just to re-quantize:
+ * at 48 kHz an hour of audio would otherwise cost a 691 MB copy and a second
+ * copy of the WAV bytes.
+ */
+export function encodeWavInt16Buffer(samples, sampleRate, { transcript = "" } = {}) {
+  const n = samples.length;
+  const info = transcript ? infoChunk(transcript) : null;
+  const infoBytes = info ? info.length : 0;
+  const buffer = new ArrayBuffer(44 + n * 2 + infoBytes);
+  const view = new DataView(buffer);
+  const writeStr = (off, s) => {
+    for (let i = 0; i < s.length; i++) view.setUint8(off + i, s.charCodeAt(i));
+  };
+  writeStr(0, "RIFF");
+  view.setUint32(4, 36 + n * 2 + infoBytes, true);
+  writeStr(8, "WAVE");
+  writeStr(12, "fmt ");
+  view.setUint32(16, 16, true);
+  view.setUint16(20, 1, true);
+  view.setUint16(22, 1, true);
+  view.setUint32(24, sampleRate, true);
+  view.setUint32(28, sampleRate * 2, true);
+  view.setUint16(32, 2, true);
+  view.setUint16(34, 16, true);
+  writeStr(36, "data");
+  view.setUint32(40, n * 2, true);
+  new Int16Array(buffer, 44, n).set(samples);
+  if (info) new Uint8Array(buffer, 44 + n * 2).set(info);
+  return buffer;
+}
