@@ -12,12 +12,12 @@ import { demuxMkv, parseBlock, parseMkvHeader, readVint } from "../src/audio/mkv
 
 function u32(value) {
   const b = new Uint8Array(4);
-  new DataView(b.buffer).setUint32(0, value, true);
+  new DataView(b.buffer).setUint32(0, value, false);
   return b;
 }
 function u16(value) {
   const b = new Uint8Array(2);
-  new DataView(b.buffer).setUint16(0, value, true);
+  new DataView(b.buffer).setUint16(0, value, false);
   return b;
 }
 function ascii(text) {
@@ -297,4 +297,20 @@ test("demuxMkv rejects a file without an audio track", async () => {
   );
   const segment = el([0x18, 0x53, 0x80, 0x67], video);
   await assert.rejects(demuxMkv(toFile(concat([ebml, segment]))), /no audio track/);
+});
+
+test("demuxMp4 finds a moov that sits beyond the head, at the end of the file", async () => {
+  // The layout of most cameras: ftyp, a large mdat, then moov, so the head read
+  // cannot reach past the media data and the tail scan has to find it.
+  const base = makeMp4();
+  const ftyp = box("ftyp", ascii("isom"), u32(0x200), ascii("isomiso2"));
+  const top = parseBoxesIn({ bytes: base, base: 0 }, 0, base.length);
+  const moovBox = top.find((b) => b.type === "moov");
+  const moovBytes = base.subarray(moovBox.start, moovBox.start + moovBox.size);
+  const media = new Uint8Array(9 * 1024 * 1024); // larger than the 8 MB head read
+  const file = concat([ftyp, box("mdat", media), moovBytes]);
+
+  const track = await demuxMp4(toFile(file));
+  assert.equal(track.samples.length, 6);
+  assert.equal(track.codec, "mp4a.40.2");
 });

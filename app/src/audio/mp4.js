@@ -31,7 +31,7 @@ export function parseBoxesIn(view, start, end) {
   const out = [];
   let offset = from;
   while (offset + 8 <= to) {
-    let size = view$.getUint32(offset, true);
+    let size = view$.getUint32(offset, false);
     const type = fourCC(bytes, offset + 4);
     let headerSize = 8;
     if (size === 1) {
@@ -77,14 +77,14 @@ function find(v, box, type) {
 function u32(v, box, offset) {
   return new DataView(v.bytes.buffer, v.bytes.byteOffset, v.bytes.byteLength).getUint32(
     box.bodyStart - v.base + offset,
-    true
+    false
   );
 }
 
 function u16(v, box, offset) {
   return new DataView(v.bytes.buffer, v.bytes.byteOffset, v.bytes.byteLength).getUint16(
     box.bodyStart - v.base + offset,
-    true
+    false
   );
 }
 
@@ -145,7 +145,7 @@ function parseStsz(v, box) {
   for (let i = 0; i < count; i++) {
     const o = box.bodyStart - v.base + 12 + i * 4;
     if (o + 4 > v.bytes.length) break;
-    sizes[i] = dv.getUint32(o, true);
+    sizes[i] = dv.getUint32(o, false);
   }
   return { uniform: 0, sizes, count };
 }
@@ -168,7 +168,7 @@ function parseChunkOffsets(v, box, is64) {
   for (let i = 0; i < count; i++) {
     const o = box.bodyStart - v.base + 8 + i * (is64 ? 8 : 4);
     if (o + (is64 ? 8 : 4) > v.bytes.length) break;
-    out[i] = is64 ? Number(dv.getBigUint64(o, true)) : dv.getUint32(o, true);
+    out[i] = is64 ? Number(dv.getBigUint64(o, false)) : dv.getUint32(o, false);
   }
   return out;
 }
@@ -183,7 +183,16 @@ async function readBox(file, box) {
  * Locate the `moov` box. It is usually before `mdat`, but some encoders put it at
  * the end, where a forward walk from the head cannot reach it; the tail is
  * scanned for the box type and read from the size field in front of it.
+ *
+ * A candidate is only accepted when it parses as a movie header. The four
+ * characters "moov" occur in video data often enough that the first match in a
+ * tail scan cannot be trusted.
  */
+function looksLikeMoov(bytes, base) {
+  const boxes = parseBoxesIn(view(bytes, base), base, base + bytes.length);
+  return boxes.some((b) => b.type === "mvhd" || b.type === "trak");
+}
+
 async function readMoov(file) {
   const head = view(new Uint8Array(await file.slice(0, Math.min(file.size, 8 * 1024 * 1024)).arrayBuffer()));
   const top = parseBoxesIn(head, 0, head.bytes.length);
@@ -199,11 +208,12 @@ async function readMoov(file) {
   const tail = new Uint8Array(await file.slice(tailStart).arrayBuffer());
   for (let i = tail.length - 8; i >= 4; i--) {
     if (fourCC(tail, i + 4) !== "moov") continue;
-    const size = new DataView(tail.buffer, tail.byteOffset, tail.byteLength).getUint32(i, true);
+    const size = new DataView(tail.buffer, tail.byteOffset, tail.byteLength).getUint32(i, false);
     if (size < 8 || size > 64 * 1024 * 1024) continue;
     const absolute = tailStart + i;
-    const payload = await file.slice(absolute + 8, absolute + size).arrayBuffer();
-    return view(new Uint8Array(payload), absolute + 8);
+    const payload = new Uint8Array(await file.slice(absolute + 8, absolute + size).arrayBuffer());
+    if (!looksLikeMoov(payload, absolute + 8)) continue;
+    return view(payload, absolute + 8);
   }
   throw new Error("the MP4 has no moov box");
 }
@@ -275,17 +285,17 @@ export async function demuxMp4(file) {
     stblView.bytes.buffer,
     stblView.bytes.byteOffset,
     stblView.bytes.byteLength
-  ).getUint32(stsd.bodyStart - stblView.base + entryOffset, true);
+  ).getUint32(stsd.bodyStart - stblView.base + entryOffset, false);
   const entryBody = stsd.bodyStart + entryOffset + 8;
   const channels = new DataView(
     stblView.bytes.buffer,
     stblView.bytes.byteOffset,
     stblView.bytes.byteLength
-  ).getUint16(entryBody - stblView.base + 16, true);
+  ).getUint16(entryBody - stblView.base + 16, false);
   const entryRate =
     new DataView(stblView.bytes.buffer, stblView.bytes.byteOffset, stblView.bytes.byteLength).getUint32(
       entryBody - stblView.base + 24,
-      true
+      false
     ) / 65536;
 
   let codec = entryType;

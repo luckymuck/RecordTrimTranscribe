@@ -255,16 +255,20 @@ export async function readAudioRange(file, options = {}) {
   const { startSec = 0, endSec = null, onProgress } = options;
   const kind = containerOf(file);
   if (kind === "wav") return readWavRange(file, options);
-  if (kind === "mp4") {
-    const track = options.track || (await demuxMp4(file));
-    if (webCodecsAvailable() && track.codec && track.samples.length) {
+  if (kind === "mp4" || kind === "mkv") {
+    let track = options.track || null;
+    try {
+      if (!track) track = kind === "mp4" ? await demuxMp4(file) : await demuxMkv(file, { stopAfterSec: endSec });
+    } catch (e) {
+      track = null;
+    }
+    if (track && webCodecsAvailable() && track.codec && track.samples && track.samples.length) {
       return decodeTrackRange(file, track, { startSec, endSec, onProgress });
     }
+    // No usable sample table -- a fragmented layout, an odd sample entry, or a
+    // codec this browser will not configure. The browser's own decoder can still
+    // try; it needs the whole file, so it carries the 2 GB guard.
     return decodeWithBrowser(file, options);
-  }
-  if (kind === "mkv") {
-    const track = await demuxMkv(file, { stopAfterSec: endSec });
-    return decodeTrackRange(file, track, { startSec, endSec, onProgress });
   }
   return decodeWithBrowser(file, options);
 }
