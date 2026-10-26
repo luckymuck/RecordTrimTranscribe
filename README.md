@@ -157,6 +157,17 @@ energy the model did not turn into anything, which usually means it was not
 intelligible. (Per-word confidence is not shown: the transcription library does
 not expose it.)
 
+**Repeated text is cleaned up.** Whisper can lock into a loop on music, noise or a
+silence-heavy window and repeat one phrase or character. Three things run on every
+transcription, always on: the decoder is given `no_repeat_ngram_size: 6`, so a
+six-token sequence cannot appear twice in a window; a window with no speech is
+skipped rather than sent to the model; and a window that still looks degenerate is
+retried once with sampling, then collapsed. Collapsing keeps the first copy and
+leaves a `**` over the dropped span, so a cut is visible rather than silent, and
+the status line reports how many passages were collapsed and windows skipped. A
+short repetition ("no, no") is left alone; only runs of four or more are treated
+as a loop.
+
 ## Ways to run it
 
 - **GitHub Pages** � the web app, at
@@ -292,9 +303,9 @@ cargo test            # 77 tests: timing, pitch, PSOLA, WSOLA, streaming, rate,
 node dsp_smoke.mjs    # WASM bindings end-to-end (needs: npx wasm-pack build --target nodejs)
 
 cd ..
-node --test app/test/*.test.mjs   # 112 JS unit tests: WAV, MP4 and MKV reading,
-                                  # resume labels, transcript parsing
-                                  # (SRT/VTT/JSON), filenames, split
+node --test app/test/*.test.mjs   # 129 JS unit tests: WAV, MP4 and MKV reading,
+                                  # resume labels, transcript parsing and
+                                  # repetition repair, filenames, split
                                   # boundaries, dial and zoom arithmetic, WAV
                                   # encoding and the embedded transcript,
                                   # speech-active normalization, clean-up scopes,

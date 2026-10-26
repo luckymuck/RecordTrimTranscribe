@@ -1,6 +1,7 @@
 // On-device transcription with Whisper via transformers.js (WASM).
 import { pipeline, env } from "@huggingface/transformers";
 import { resampleHQ } from "../audio/decode.js";
+import { collapseRepeats, looksRepetitive } from "../transcript/clean.js";
 
 // Both the library and the ONNX Runtime wasm are vendored under app/vendor/, so
 // the desktop build runs with no network at all. The bundled models live in
@@ -175,6 +176,34 @@ function findSilenceGaps(samples, sampleRate, minSilenceSeconds = TRANSCRIPTION_
 }
 
 /**
+ * The share of a window that is speech rather than silence.
+ *
+ * `gaps` are the silence runs from `findSilenceGaps`, in samples. A window with
+ * almost none is one Whisper would fill with a repeated phrase.
+ */
+function windowSpeechFraction(seg, gaps) {
+  const length = Math.max(1, seg.audioEnd - seg.audioStart);
+  let silent = 0;
+  for (const [gapStart, gapEnd] of gaps) {
+    const start = Math.max(seg.audioStart, gapStart);
+    const end = Math.min(seg.audioEnd, gapEnd);
+    if (end > start) silent += end - start;
+  }
+  return Math.max(0, length - silent) / length;
+}
+
+/** Nothing worth sending to the model unless at least this much is speech. */
+const WINDOW_MIN_SPEECH = 0.02;
+
+/**
+ * Decoder-level repetition guard: no six-token sequence may appear twice in a
+ * window. Six rather than four is deliberately gentle -- a four-token limit also
+ * forbids a natural four-word phrase from being said twice, and cuts looping
+ * sentences mid-way. What survives is tidied by `collapseRepeats`.
+ */
+const REPEAT_OPTIONS = { no_repeat_ngram_size: 6 };
+
+/**
  * Divide audio into sequential model windows that never exceed Whisper's
  * 30-second input context. Words are retained only from each window's assigned
  * range, while adjacent windows carry up to 2.5 seconds of acoustic context.
@@ -185,13 +214,16 @@ function splitTranscriptionWindows(samples, sampleRate) {
   }
   const total = samples.length;
   const maximum = Math.max(1, Math.round(TRANSCRIPTION_WINDOW_SECONDS * sampleRate));
+  const gaps = findSilenceGaps(samples, sampleRate);
   if (total <= maximum) {
-    return [{ audioStart: 0, audioEnd: total, assignStart: 0, assignEnd: total }];
+    return {
+      windows: [{ audioStart: 0, audioEnd: total, assignStart: 0, assignEnd: total }],
+      gaps,
+    };
   }
 
   const minimumMain = Math.max(1, Math.round(TRANSCRIPTION_MIN_MAIN_SECONDS * sampleRate));
   const overlap = Math.max(1, Math.round(TRANSCRIPTION_OVERLAP_SECONDS * sampleRate));
-  const gaps = findSilenceGaps(samples, sampleRate);
   const windows = [];
   let assignStart = 0;
   let audioStart = 0;
@@ -224,7 +256,7 @@ function splitTranscriptionWindows(samples, sampleRate) {
     audioStart = Math.max(0, assignStart - overlap);
     if (windows.length > 10000) break;
   }
-  return windows;
+  return { windows, gaps };
 }
 
 /**
@@ -247,7 +279,7 @@ export async function transcribe(pcm, sampleRate, modelId, { onProgress, onStatu
   const pipe = await getPipeline(modelId, onProgress);
   onStatus && onStatus("Transcribing… 0%");
   const pcm16k = await resampleHQ(pcm, sampleRate, 16000);
-  const windows = splitTranscriptionWindows(pcm16k, 16000);
+  const { windows, gaps: speechGaps } = splitTranscriptionWindows(pcm16k, 16000);
   const totalSeconds = pcm16k.length / 16000;
   // Forcing the language avoids per-window auto-detection, which can mislabel
   // quiet or noisy windows and produce the wrong language (or a translation).
@@ -283,6 +315,8 @@ export async function transcribe(pcm, sampleRate, modelId, { onProgress, onStatu
   const chunks = [];
   let wantTimestamps = true;
   let completedSeconds = 0;
+  let repaired = 0;
+  let skippedSilence = 0;
 
   try {
   // Window texts are joined with a space when they come from the plain-text
@@ -302,19 +336,54 @@ export async function transcribe(pcm, sampleRate, modelId, { onProgress, onStatu
     const assignEndSeconds = seg.assignEnd / 16000;
     const chunksBefore = chunks.length;
 
+    // A window with no speech gives the decoder nothing to transcribe and it
+    // fills the gap with a loop. Skipping it is both faster and quieter.
+    if (windowSpeechFraction(seg, speechGaps) < WINDOW_MIN_SPEECH) {
+      skippedSilence += 1;
+      completedSeconds = assignEndSeconds;
+      if (onSegment) {
+        onSegment({
+          index,
+          segments: windows.length,
+          start: assignStartSeconds,
+          end: assignEndSeconds,
+          chunks: [],
+        });
+      }
+      await yieldToUI();
+      continue;
+    }
+
     if (wantTimestamps) {
       try {
-        const result = await infer(
+        let result = await infer(
           pcm16k.subarray(seg.audioStart, seg.audioEnd),
-          { ...baseOptions, return_timestamps: "word" }
+          { ...baseOptions, return_timestamps: "word", ...REPEAT_OPTIONS }
         );
+        const windowSeconds = (seg.audioEnd - seg.audioStart) / 16000;
+        if (looksRepetitive(result, windowSeconds)) {
+          // Sampling with a little temperature breaks a locked loop in a way the
+          // n-gram limit alone cannot: with only the limit the model simply takes
+          // another token and keeps going.
+          result = await infer(pcm16k.subarray(seg.audioStart, seg.audioEnd), {
+            ...baseOptions,
+            return_timestamps: "word",
+            ...REPEAT_OPTIONS,
+            do_sample: true,
+            temperature: 0.4,
+            repetition_penalty: 1.05,
+          });
+        }
+        const cleaned = collapseRepeats(result);
+        if (cleaned.removed.length) repaired += 1;
+        result = cleaned.result;
         const words = Array.isArray(result.chunks) ? result.chunks : [];
         const timestamped = words.filter((word) => Array.isArray(word.timestamp));
         if (result.text && timestamped.length === 0) {
           wantTimestamps = false;
           const fallback = await infer(
             pcm16k.subarray(seg.assignStart, seg.assignEnd),
-            { ...baseOptions }
+            { ...baseOptions, ...REPEAT_OPTIONS }
           );
           appendText(fallback.text);
           // Keep what was collected before the model gave up on timestamps: this
@@ -392,6 +461,8 @@ export async function transcribe(pcm, sampleRate, modelId, { onProgress, onStatu
         timestamped: wantTimestamps,
         stalled: true,
         completedSeconds,
+        repaired,
+        skippedSilence,
       };
     }
     throw err;
@@ -399,5 +470,11 @@ export async function transcribe(pcm, sampleRate, modelId, { onProgress, onStatu
 
   // Chunks are returned even when word timestamps were unavailable: those
   // windows are represented as one span each, so the transcript is complete.
-  return { text, chunks: chunks.length ? chunks : null, timestamped: wantTimestamps };
+  return {
+    text,
+    chunks: chunks.length ? chunks : null,
+    timestamped: wantTimestamps,
+    repaired,
+    skippedSilence,
+  };
 }

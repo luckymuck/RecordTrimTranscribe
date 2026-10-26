@@ -1739,9 +1739,14 @@ $("transcribeBtn").addEventListener("click", async () => {
       const pct = Math.round(100 * Math.min(1, (raw.completedSeconds || 0) / duration));
       $("txStatus").textContent = `Partial transcript (stopped at ${pct}% — inference stalled). Re-run to finish.`;
     } else {
-      $("txStatus").textContent = state.transcript.timestamped
+      const base = state.transcript.timestamped
         ? "Done"
-        : "Done (no timestamps — model lacked cross-attention data)";
+        : "Done (no timestamps - model lacked cross-attention data)";
+      // Say what the repetition guard did, rather than cleaning text silently.
+      const notes = [];
+      if (raw.repaired) notes.push(`${raw.repaired} repeated passage${raw.repaired === 1 ? "" : "s"} collapsed`);
+      if (raw.skippedSilence) notes.push(`${raw.skippedSilence} silent window${raw.skippedSilence === 1 ? "" : "s"} skipped`);
+      $("txStatus").textContent = notes.length ? `${base} · ${notes.join(", ")}` : base;
     }
   } catch (e) {
     $("txStatus").textContent =
